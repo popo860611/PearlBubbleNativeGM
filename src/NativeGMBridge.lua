@@ -1,0 +1,589 @@
+local NativeGMBridge = {}
+
+local COMMAND_PATH = "./tmpNew/PearlBubbleNativeGM.cmd"
+local STATUS_PATH = "./tmpNew/PearlBubbleNativeGM.status"
+local EVENT_LOG_PATH = "./tmpNew/PearlBubbleNativeGM.events.log"
+
+NativeGMBridge.lastNonce = ""
+NativeGMBridge.nextRewardType = nil
+NativeGMBridge.persistentRewardType = nil
+NativeGMBridge.scheduleId = nil
+NativeGMBridge.originalShootDraBallByRes = nil
+NativeGMBridge.originalOnSyncConeyAck = nil
+NativeGMBridge.originalOnUserConeyChanged = nil
+NativeGMBridge.originalOnChangeMoneyNotify = nil
+NativeGMBridge.originalOnEventChangeNotify = nil
+NativeGMBridge.originalOnGetSuperRewardRes = nil
+NativeGMBridge.originalAddBonusDraBall = nil
+NativeGMBridge.originalOnEventBallDropDwon = nil
+NativeGMBridge.originalOnDraBallTrigger = nil
+NativeGMBridge.originalGameCtrlAddProperty = nil
+NativeGMBridge.statusPollCount = 0
+NativeGMBridge.lastState = "unknown"
+NativeGMBridge.lastDetail = ""
+NativeGMBridge.lastAccountBalance = "unknown"
+NativeGMBridge.lastServerFinal = "unknown"
+NativeGMBridge.lastServerAdd = "unknown"
+NativeGMBridge.lastServerSub = "unknown"
+NativeGMBridge.lastServerRewardCount = 0
+NativeGMBridge.lastServerRewardTypes = "none"
+NativeGMBridge.lastServerPathReward = "unknown"
+NativeGMBridge.lastVisualPathReward = "none"
+NativeGMBridge.serverRewardSerial = 0
+NativeGMBridge.lastServerCode = "none"
+NativeGMBridge.serverCodeAccountBefore = "unknown"
+NativeGMBridge.serverCodeRewardSerialBefore = 0
+NativeGMBridge.serverCodeSentAt = "unknown"
+NativeGMBridge.rewardCreditSerial = 0
+
+-- requireWithClearLoaded() does not reliably forward a module return value in
+-- this client, so publish the bridge before Start() is requested by main.lua.
+if dinoBall ~= nil then
+    dinoBall.NativeGMBridge = NativeGMBridge
+end
+
+local function readAccountBalance()
+    if Gt2UserApp == nil or dinoBall == nil or dinoBall.currencyType == nil then
+        return NativeGMBridge.lastAccountBalance
+    end
+    local ok, value = pcall(function()
+        return Gt2UserApp:GetMoney(dinoBall.currencyType)
+    end)
+    if ok and value ~= nil then
+        NativeGMBridge.lastAccountBalance = value
+    end
+    return NativeGMBridge.lastAccountBalance
+end
+
+local function appendEvent(name, detail)
+    local file = io.open(EVENT_LOG_PATH, "a")
+    if file == nil then
+        return
+    end
+    file:write(tostring(os.time()) .. "|" .. tostring(name) .. "|" .. tostring(detail) .. "\n")
+    file:close()
+end
+
+local function safeDetail(value)
+    local text = tostring(value)
+    text = string.gsub(text, "[\r\n]", " ")
+    return string.gsub(text, ",", ";")
+end
+
+local function readLocalBalance()
+    local property = dinoBall and dinoBall.propertyMgrInst or nil
+    return property and property.getProperty and property:getProperty() or "unknown"
+end
+
+local function scheduleBalanceProbe(serial, delaySeconds)
+    local director = cc and cc.Director and cc.Director:getInstance() or nil
+    local scheduler = director and director:getScheduler() or nil
+    if scheduler == nil then
+        return
+    end
+    local scheduleId = nil
+    scheduleId = scheduler:scheduleScriptFunc(function()
+        if scheduleId ~= nil then
+            scheduler:unscheduleScriptEntry(scheduleId)
+            scheduleId = nil
+        end
+        appendEvent("balance_probe", "reward_serial=" .. tostring(serial)
+            .. ",delay_s=" .. tostring(delaySeconds)
+            .. ",local_balance=" .. tostring(readLocalBalance())
+            .. ",account_balance=" .. tostring(readAccountBalance()))
+    end, delaySeconds, false)
+end
+
+local function writeStatus(state, detail)
+    if state ~= nil then
+        NativeGMBridge.lastState = state
+    end
+    if detail ~= nil then
+        NativeGMBridge.lastDetail = detail
+    end
+    local file = io.open(STATUS_PATH .. ".tmp", "w")
+    if file == nil then
+        return
+    end
+    local pending = NativeGMBridge.nextRewardType
+    local property = dinoBall and dinoBall.propertyMgrInst or nil
+    local localBase = property and property.propertyValue or "unknown"
+    local localDelta = property and property.propertyChangeValue or "unknown"
+    local localBalance = property and property.getProperty and property:getProperty() or "unknown"
+    local accountBalance = readAccountBalance()
+    local accountBefore = tonumber(NativeGMBridge.serverCodeAccountBefore)
+    local accountNow = tonumber(accountBalance)
+    local serverCodeAccountDelta = "unknown"
+    if accountBefore ~= nil and accountNow ~= nil then
+        serverCodeAccountDelta = accountNow - accountBefore
+    end
+    local serverCodeRewardDelta = NativeGMBridge.serverRewardSerial
+        - NativeGMBridge.serverCodeRewardSerialBefore
+    local gameMain = dinoBall and dinoBall.gameMain or nil
+    local syncIndex = gameMain and gameMain.syncGameIndex or "unknown"
+    file:write("state=" .. tostring(NativeGMBridge.lastState) .. "\n")
+    file:write("detail=" .. tostring(NativeGMBridge.lastDetail) .. "\n")
+    file:write("pending=" .. (pending == nil and "none" or tostring(pending)) .. "\n")
+    file:write("persistent_path=" .. (NativeGMBridge.persistentRewardType == nil
+        and "none" or tostring(NativeGMBridge.persistentRewardType)) .. "\n")
+    file:write("account_balance=" .. tostring(accountBalance) .. "\n")
+    file:write("local_balance=" .. tostring(localBalance) .. "\n")
+    file:write("local_base=" .. tostring(localBase) .. "\n")
+    file:write("local_delta=" .. tostring(localDelta) .. "\n")
+    file:write("server_final=" .. tostring(NativeGMBridge.lastServerFinal) .. "\n")
+    file:write("server_add=" .. tostring(NativeGMBridge.lastServerAdd) .. "\n")
+    file:write("server_sub=" .. tostring(NativeGMBridge.lastServerSub) .. "\n")
+    file:write("sync_index=" .. tostring(syncIndex) .. "\n")
+    file:write("server_reward_count=" .. tostring(NativeGMBridge.lastServerRewardCount) .. "\n")
+    file:write("server_reward_types=" .. tostring(NativeGMBridge.lastServerRewardTypes) .. "\n")
+    file:write("server_path_reward=" .. tostring(NativeGMBridge.lastServerPathReward) .. "\n")
+    file:write("visual_path_reward=" .. tostring(NativeGMBridge.lastVisualPathReward) .. "\n")
+    file:write("server_code=" .. tostring(NativeGMBridge.lastServerCode) .. "\n")
+    file:write("server_code_sent_at=" .. tostring(NativeGMBridge.serverCodeSentAt) .. "\n")
+    file:write("server_code_account_before=" .. tostring(NativeGMBridge.serverCodeAccountBefore) .. "\n")
+    file:write("server_code_account_delta=" .. tostring(serverCodeAccountDelta) .. "\n")
+    file:write("server_code_reward_delta=" .. tostring(serverCodeRewardDelta) .. "\n")
+    file:close()
+    os.remove(STATUS_PATH)
+    os.rename(STATUS_PATH .. ".tmp", STATUS_PATH)
+end
+
+local function installDiagnostics()
+    local gameMain = dinoBall and dinoBall.gameMain or nil
+
+    if dinoBall ~= nil and dinoBall.Machine ~= nil
+        and NativeGMBridge.originalAddBonusDraBall == nil
+        and dinoBall.Machine.addBonusDraBall ~= nil then
+        NativeGMBridge.originalAddBonusDraBall = dinoBall.Machine.addBonusDraBall
+        dinoBall.Machine.addBonusDraBall = function(self, count, ballType, dropInfo)
+            local result = NativeGMBridge.originalAddBonusDraBall(self, count, ballType, dropInfo)
+            appendEvent("ball_created", "ball_type=" .. tostring(ballType)
+                .. ",count=" .. tostring(count)
+                .. ",drop_info=" .. tostring(dropInfo ~= nil))
+            return result
+        end
+    end
+
+    if gameMain ~= nil and NativeGMBridge.originalOnEventBallDropDwon == nil
+        and gameMain.OnEventBallDropDwon ~= nil then
+        NativeGMBridge.originalOnEventBallDropDwon = gameMain.OnEventBallDropDwon
+        gameMain.OnEventBallDropDwon = function(self, data)
+            appendEvent("platform_drop", "ball_type=" .. tostring(data and data.ballType)
+                .. ",ball_tag=" .. tostring(data and data.ballTag)
+                .. ",sync_before=" .. tostring(self.syncGameIndex))
+            return NativeGMBridge.originalOnEventBallDropDwon(self, data)
+        end
+    end
+    if gameMain ~= nil and NativeGMBridge.originalOnSyncConeyAck == nil
+        and gameMain.OnSyncConeyAck ~= nil then
+        NativeGMBridge.originalOnSyncConeyAck = gameMain.OnSyncConeyAck
+        gameMain.OnSyncConeyAck = function(self, data)
+            if data ~= nil then
+                NativeGMBridge.lastServerFinal = data.finalNum or "unknown"
+                NativeGMBridge.lastServerAdd = data.addNum or "unknown"
+                NativeGMBridge.lastServerSub = data.subNum or "unknown"
+            end
+            local result = NativeGMBridge.originalOnSyncConeyAck(self, data)
+            appendEvent("server_sync", "final=" .. tostring(NativeGMBridge.lastServerFinal)
+                .. ",add=" .. tostring(NativeGMBridge.lastServerAdd)
+                .. ",sub=" .. tostring(NativeGMBridge.lastServerSub)
+                .. ",local_balance=" .. tostring(readLocalBalance())
+                .. ",account_balance=" .. tostring(readAccountBalance()))
+            writeStatus("server_sync", "authoritative balance received")
+            return result
+        end
+    end
+
+    if gameMain ~= nil and NativeGMBridge.originalOnUserConeyChanged == nil
+        and gameMain.OnUserConeyChanged ~= nil then
+        NativeGMBridge.originalOnUserConeyChanged = gameMain.OnUserConeyChanged
+        gameMain.OnUserConeyChanged = function(self, data)
+            if data ~= nil and data.coney ~= nil then
+                NativeGMBridge.lastAccountBalance = data.coney
+            end
+            local result = NativeGMBridge.originalOnUserConeyChanged(self, data)
+            appendEvent("account_update", "balance=" .. tostring(NativeGMBridge.lastAccountBalance))
+            writeStatus("account_update", "platform balance notification received")
+            return result
+        end
+    end
+
+    if gameMain ~= nil and NativeGMBridge.originalOnChangeMoneyNotify == nil
+        and gameMain.OnChangeMoneyNotify ~= nil then
+        NativeGMBridge.originalOnChangeMoneyNotify = gameMain.OnChangeMoneyNotify
+        gameMain.OnChangeMoneyNotify = function(self, data)
+            local amount = data and data.changeAmount or "unknown"
+            local accountBefore = readAccountBalance()
+            local localBefore = readLocalBalance()
+            local result = NativeGMBridge.originalOnChangeMoneyNotify(self, data)
+            appendEvent("money_notify", "amount=" .. tostring(amount)
+                .. ",local_before=" .. tostring(localBefore)
+                .. ",local_after=" .. tostring(readLocalBalance())
+                .. ",account_before=" .. tostring(accountBefore)
+                .. ",account_after=" .. tostring(readAccountBalance()))
+            return result
+        end
+    end
+
+    if gameMain ~= nil and NativeGMBridge.originalOnEventChangeNotify == nil
+        and gameMain.OnEventChangeNotify ~= nil then
+        NativeGMBridge.originalOnEventChangeNotify = gameMain.OnEventChangeNotify
+        gameMain.OnEventChangeNotify = function(self, data)
+            local amount = data and data.changeAmount or "unknown"
+            local accountBefore = readAccountBalance()
+            local localBefore = readLocalBalance()
+            local result = NativeGMBridge.originalOnEventChangeNotify(self, data)
+            appendEvent("event_money_notify", "amount=" .. tostring(amount)
+                .. ",local_before=" .. tostring(localBefore)
+                .. ",local_after=" .. tostring(readLocalBalance())
+                .. ",account_before=" .. tostring(accountBefore)
+                .. ",account_after=" .. tostring(readAccountBalance()))
+            return result
+        end
+    end
+
+    local gameCtrl = gameMain and gameMain.gameView and gameMain.gameView.gameCtrl or nil
+    if gameCtrl ~= nil and NativeGMBridge.originalGameCtrlAddProperty == nil
+        and gameCtrl.addProperty ~= nil then
+        NativeGMBridge.originalGameCtrlAddProperty = gameCtrl.addProperty
+        gameCtrl.addProperty = function(self, value, from)
+            local localBefore = readLocalBalance()
+            local accountBefore = readAccountBalance()
+            local result = NativeGMBridge.originalGameCtrlAddProperty(self, value, from)
+            local localAfter = readLocalBalance()
+            local accountAfter = readAccountBalance()
+            local source = safeDetail(from)
+            appendEvent("property_change", "value=" .. tostring(value)
+                .. ",source=" .. source
+                .. ",local_before=" .. tostring(localBefore)
+                .. ",local_after=" .. tostring(localAfter)
+                .. ",account_before=" .. tostring(accountBefore)
+                .. ",account_after=" .. tostring(accountAfter))
+            if string.find(source, "獎項表演", 1, true) ~= nil then
+                NativeGMBridge.rewardCreditSerial = NativeGMBridge.rewardCreditSerial + 1
+                local serial = NativeGMBridge.rewardCreditSerial
+                appendEvent("reward_credit", "reward_serial=" .. tostring(serial)
+                    .. ",value=" .. tostring(value)
+                    .. ",source=" .. source
+                    .. ",local_before=" .. tostring(localBefore)
+                    .. ",local_after=" .. tostring(localAfter)
+                    .. ",account_before=" .. tostring(accountBefore)
+                    .. ",account_after=" .. tostring(accountAfter))
+                scheduleBalanceProbe(serial, 0.5)
+                scheduleBalanceProbe(serial, 2.0)
+                scheduleBalanceProbe(serial, 5.0)
+                scheduleBalanceProbe(serial, 10.0)
+                writeStatus("reward_credit", "delayed prize credit observed")
+            end
+            return result
+        end
+    end
+    if gameCtrl ~= nil and NativeGMBridge.originalOnGetSuperRewardRes == nil
+        and gameCtrl.onGetSuperRewardRes ~= nil then
+        NativeGMBridge.originalOnGetSuperRewardRes = gameCtrl.onGetSuperRewardRes
+        gameCtrl.onGetSuperRewardRes = function(self, data)
+            local rewardTypes = {}
+            local list = data and data.superRewardResList or nil
+            NativeGMBridge.lastServerRewardCount = list and #list or 0
+            if list ~= nil then
+                for _, reward in ipairs(list) do
+                    table.insert(rewardTypes, tostring(reward.superRewardType))
+                    appendEvent("server_outcome", "ball_type=" .. tostring(reward.ballType)
+                        .. ",assigned_reward=" .. tostring(reward.superRewardType)
+                        .. ",broadcast_index=" .. tostring(reward.broadcastIndex)
+                        .. ",soul_num=" .. tostring(reward.soulNum))
+                end
+            end
+            NativeGMBridge.lastServerRewardTypes = #rewardTypes > 0 and table.concat(rewardTypes, ",") or "none"
+            NativeGMBridge.serverRewardSerial = NativeGMBridge.serverRewardSerial + 1
+            local result = NativeGMBridge.originalOnGetSuperRewardRes(self, data)
+            appendEvent("server_reward", "types=" .. tostring(NativeGMBridge.lastServerRewardTypes))
+            writeStatus("server_reward", "dragon-ball result received")
+            return result
+        end
+    end
+
+    if gameCtrl ~= nil and NativeGMBridge.originalOnDraBallTrigger == nil
+        and gameCtrl.onDraBallTrigger ~= nil then
+        NativeGMBridge.originalOnDraBallTrigger = gameCtrl.onDraBallTrigger
+        gameCtrl.onDraBallTrigger = function(self, discAngle, ballType, ballPos)
+            local accountBefore = readAccountBalance()
+            local property = dinoBall and dinoBall.propertyMgrInst or nil
+            local localBefore = property and property.getProperty and property:getProperty() or "unknown"
+            local assignedReward = self.currDraBallRewardType
+            local result = NativeGMBridge.originalOnDraBallTrigger(self, discAngle, ballType, ballPos)
+            local localAfter = property and property.getProperty and property:getProperty() or "unknown"
+            local accountAfter = readAccountBalance()
+            appendEvent("wheel_landed", "ball_type=" .. tostring(ballType)
+                .. ",assigned_reward=" .. tostring(assignedReward)
+                .. ",disc_angle=" .. tostring(discAngle)
+                .. ",local_before=" .. tostring(localBefore)
+                .. ",local_after=" .. tostring(localAfter)
+                .. ",account_before=" .. tostring(accountBefore)
+                .. ",account_after=" .. tostring(accountAfter))
+            writeStatus("wheel_landed", "final wheel trigger observed")
+            return result
+        end
+    end
+end
+
+local function sendServerCode(codeText)
+    if codeText == nil or string.match(codeText, "^%d+$") == nil
+        or #codeText < 1 or #codeText > 8 then
+        writeStatus("error", "server code must contain 1-8 digits")
+        return
+    end
+    local gameMain = dinoBall and dinoBall.gameMain or nil
+    local protocol = dinoBall and dinoBall.Protocol
+        and dinoBall.Protocol.DINOBALL_U2G_PROTOCOL or nil
+    if gameMain == nil or gameMain.SendLuaCommand == nil or protocol == nil
+        or protocol.U2G_CHEAT_CODE_REQ == nil or PearlBubbleCheatCodeReq == nil then
+        writeStatus("not_ready", "server cheat protocol unavailable")
+        return
+    end
+
+    local numericCode = tonumber(codeText)
+    if numericCode == nil then
+        writeStatus("error", "invalid server code")
+        return
+    end
+    NativeGMBridge.lastServerCode = codeText
+    NativeGMBridge.serverCodeAccountBefore = readAccountBalance()
+    NativeGMBridge.serverCodeRewardSerialBefore = NativeGMBridge.serverRewardSerial
+    NativeGMBridge.serverCodeSentAt = os.time()
+
+    local request = PearlBubbleCheatCodeReq:create()
+    request.code = numericCode
+    gameMain:SendLuaCommand(protocol.U2G_CHEAT_CODE_REQ, request)
+    appendEvent("server_code_sent", "code=" .. codeText
+        .. ",account_before=" .. tostring(NativeGMBridge.serverCodeAccountBefore))
+    writeStatus("server_sent", "server cheat code=" .. codeText)
+end
+
+local function getMachine()
+    if dinoBall == nil or dinoBall.gameMain == nil or dinoBall.gameMain.gameView == nil then
+        return nil
+    end
+    return dinoBall.gameMain.gameView.machine
+end
+
+local function addBall(ballType, label)
+    local machine = getMachine()
+    if machine == nil or machine.addBonusDraBall == nil or machine.createBonusDraBall == nil then
+        writeStatus("not_ready", "machine unavailable")
+        return
+    end
+
+    local dropInfo = nil
+    if ballType == dinoBall.Define.BallType.DraBall
+        and dinoBall.gameMain.gameView.gameCtrl
+        and dinoBall.gameMain.gameView.gameCtrl.getBonusDraBallDropInfo then
+        dropInfo = dinoBall.gameMain.gameView.gameCtrl:getBonusDraBallDropInfo()
+    end
+
+    machine:addBonusDraBall(1, ballType, dropInfo)
+    machine:createBonusDraBall()
+    writeStatus("executed", label)
+end
+
+-- Follow the same dragon-hole path used by the shipped TestUI instead of
+-- directly creating a physics object. This records SGSCSE_EnterMid and lets
+-- the game's normal launcher delay create the ball.
+local function triggerNaturalDraBall()
+    local gameMain = dinoBall and dinoBall.gameMain or nil
+    local gameCtrl = gameMain and gameMain.gameView and gameMain.gameView.gameCtrl or nil
+    local define = dinoBall and dinoBall.Define or nil
+    if gameCtrl == nil or gameCtrl.onPartyTrigger == nil or define == nil
+        or define.PartyTriggerDefine == nil or define.PartyTriggerType == nil
+        or define.BlockGroup == nil or define.MachineDefine == nil
+        or define.MachineDefine.PartyTrigger == nil then
+        writeStatus("not_ready", "natural dragon-ball trigger unavailable")
+        return
+    end
+
+    local triggerIndex = nil
+    for index, triggerType in pairs(define.PartyTriggerDefine) do
+        if triggerType == define.PartyTriggerType.DraBall then
+            triggerIndex = index
+            break
+        end
+    end
+    if triggerIndex == nil then
+        writeStatus("error", "dragon-ball party-hole index unavailable")
+        return
+    end
+
+    local sourcePos = define.MachineDefine.PartyTrigger.CenterPos
+    local triggerPos = sourcePos
+    if clone ~= nil then
+        triggerPos = clone(sourcePos)
+    elseif cc ~= nil and cc.vec3 ~= nil and sourcePos ~= nil then
+        triggerPos = cc.vec3(sourcePos.x, sourcePos.y, sourcePos.z)
+    end
+
+    local syncBefore = gameMain.syncGameIndex
+    gameCtrl:onPartyTrigger(triggerIndex, triggerPos, define.BlockGroup.EnterDraBall)
+    appendEvent("natural_draball_trigger", "index=" .. tostring(triggerIndex)
+        .. ",block_group=" .. tostring(define.BlockGroup.EnterDraBall)
+        .. ",sync_before=" .. tostring(syncBefore))
+    writeStatus("executed", "natural dragon-ball party-hole flow triggered")
+end
+
+local function installPathOverride()
+    if NativeGMBridge.originalShootDraBallByRes ~= nil then
+        return true
+    end
+    if dinoBall == nil or dinoBall.Machine == nil or dinoBall.Machine.shootDraBallByRes == nil then
+        return false
+    end
+
+    NativeGMBridge.originalShootDraBallByRes = dinoBall.Machine.shootDraBallByRes
+    dinoBall.Machine.shootDraBallByRes = function(self, ballType, rewardType)
+        NativeGMBridge.lastServerPathReward = rewardType
+        local selected = NativeGMBridge.nextRewardType
+        if selected ~= nil then
+            NativeGMBridge.nextRewardType = nil
+        else
+            selected = NativeGMBridge.persistentRewardType
+        end
+        if selected ~= nil then
+            NativeGMBridge.lastVisualPathReward = selected
+            appendEvent("path_applied", "ball_type=" .. tostring(ballType)
+                .. ",server_reward=" .. tostring(rewardType)
+                .. ",visual_path=" .. tostring(selected))
+            writeStatus("applied", "visual path=" .. tostring(selected)
+                .. ", server reward=" .. tostring(rewardType))
+            return NativeGMBridge.originalShootDraBallByRes(self, ballType, selected)
+        end
+        NativeGMBridge.lastVisualPathReward = rewardType
+        return NativeGMBridge.originalShootDraBallByRes(self, ballType, rewardType)
+    end
+    return true
+end
+
+local function dispatch(command)
+    local codeText = string.match(command, "^SERVER_CODE:(%d+)$")
+    local holdPath = string.match(command, "^PATH_([123])_HOLD$")
+    if holdPath ~= nil then
+        NativeGMBridge.nextRewardType = nil
+        NativeGMBridge.persistentRewardType = tonumber(holdPath)
+        local pathNames = { [1] = "small", [2] = "middle", [3] = "big" }
+        writeStatus("armed", "persistent path=" .. pathNames[NativeGMBridge.persistentRewardType])
+    elseif codeText ~= nil then
+        sendServerCode(codeText)
+    elseif command == "ADD_DRA" then
+        triggerNaturalDraBall()
+    elseif command == "ADD_RAIN" then
+        addBall(dinoBall.Define.BallType.Rainball, "rainbow ball added")
+    elseif command == "PATH_0" then
+        NativeGMBridge.nextRewardType = 0
+        writeStatus("armed", "next path=none")
+    elseif command == "PATH_1" then
+        NativeGMBridge.nextRewardType = 1
+        writeStatus("armed", "next path=small")
+    elseif command == "PATH_2" then
+        NativeGMBridge.nextRewardType = 2
+        writeStatus("armed", "next path=middle")
+    elseif command == "PATH_3" then
+        NativeGMBridge.nextRewardType = 3
+        writeStatus("armed", "next path=big")
+    elseif command == "CANCEL_PATH" then
+        NativeGMBridge.nextRewardType = nil
+        NativeGMBridge.persistentRewardType = nil
+        writeStatus("ready", "path override cancelled")
+    else
+        writeStatus("error", "unknown command=" .. tostring(command))
+    end
+end
+
+local function pollCommand()
+    installPathOverride()
+    installDiagnostics()
+    NativeGMBridge.statusPollCount = NativeGMBridge.statusPollCount + 1
+    if NativeGMBridge.statusPollCount >= 10 then
+        NativeGMBridge.statusPollCount = 0
+        writeStatus(nil, nil)
+    end
+    local file = io.open(COMMAND_PATH, "r")
+    if file == nil then
+        return
+    end
+    local content = file:read("*a") or ""
+    file:close()
+    local nonce, command = string.match(content, "^([^|\r\n]+)|([^\r\n]+)")
+    if nonce == nil or command == nil or nonce == NativeGMBridge.lastNonce then
+        return
+    end
+    NativeGMBridge.lastNonce = nonce
+    local ok, err = pcall(dispatch, command)
+    if not ok then
+        writeStatus("error", tostring(err))
+    end
+end
+
+function NativeGMBridge:Start()
+    if self.scheduleId ~= nil then
+        return
+    end
+    -- Never replay a command left behind by an earlier game session.
+    os.remove(COMMAND_PATH)
+    dinoBall.NativeGMBridge = self
+    installPathOverride()
+    installDiagnostics()
+    self.scheduleId = cc.Director:getInstance():getScheduler():scheduleScriptFunc(pollCommand, 0.10, false)
+    writeStatus("ready", "Pearl Bubble bridge online")
+end
+
+function NativeGMBridge:Stop()
+    self.nextRewardType = nil
+    self.persistentRewardType = nil
+    if self.scheduleId ~= nil then
+        cc.Director:getInstance():getScheduler():unscheduleScriptEntry(self.scheduleId)
+        self.scheduleId = nil
+    end
+    if self.originalShootDraBallByRes ~= nil and dinoBall and dinoBall.Machine then
+        dinoBall.Machine.shootDraBallByRes = self.originalShootDraBallByRes
+        self.originalShootDraBallByRes = nil
+    end
+    if self.originalAddBonusDraBall ~= nil and dinoBall and dinoBall.Machine then
+        dinoBall.Machine.addBonusDraBall = self.originalAddBonusDraBall
+        self.originalAddBonusDraBall = nil
+    end
+    local gameMain = dinoBall and dinoBall.gameMain or nil
+    if self.originalOnSyncConeyAck ~= nil and gameMain ~= nil then
+        gameMain.OnSyncConeyAck = self.originalOnSyncConeyAck
+        self.originalOnSyncConeyAck = nil
+    end
+    if self.originalOnUserConeyChanged ~= nil and gameMain ~= nil then
+        gameMain.OnUserConeyChanged = self.originalOnUserConeyChanged
+        self.originalOnUserConeyChanged = nil
+    end
+    if self.originalOnChangeMoneyNotify ~= nil and gameMain ~= nil then
+        gameMain.OnChangeMoneyNotify = self.originalOnChangeMoneyNotify
+        self.originalOnChangeMoneyNotify = nil
+    end
+    if self.originalOnEventChangeNotify ~= nil and gameMain ~= nil then
+        gameMain.OnEventChangeNotify = self.originalOnEventChangeNotify
+        self.originalOnEventChangeNotify = nil
+    end
+    if self.originalOnEventBallDropDwon ~= nil and gameMain ~= nil then
+        gameMain.OnEventBallDropDwon = self.originalOnEventBallDropDwon
+        self.originalOnEventBallDropDwon = nil
+    end
+    local gameCtrl = gameMain and gameMain.gameView and gameMain.gameView.gameCtrl or nil
+    if self.originalOnGetSuperRewardRes ~= nil and gameCtrl ~= nil then
+        gameCtrl.onGetSuperRewardRes = self.originalOnGetSuperRewardRes
+        self.originalOnGetSuperRewardRes = nil
+    end
+    if self.originalOnDraBallTrigger ~= nil and gameCtrl ~= nil then
+        gameCtrl.onDraBallTrigger = self.originalOnDraBallTrigger
+        self.originalOnDraBallTrigger = nil
+    end
+    if self.originalGameCtrlAddProperty ~= nil and gameCtrl ~= nil then
+        gameCtrl.addProperty = self.originalGameCtrlAddProperty
+        self.originalGameCtrlAddProperty = nil
+    end
+    writeStatus("stopped", "bridge stopped")
+end
+
+return NativeGMBridge
