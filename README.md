@@ -20,6 +20,14 @@
 
 ## BAT 自動安裝（建議）
 
+若另一台電腦缺少 `tmpNew\Lua\PearlBubbleLua\main.lua`，先下載並解壓：
+
+`resource-pack/PearlBubbleLua_ResourcePack_v2.1.zip`
+
+執行其中的 `INSTALL_RESOURCES.bat` 補齊深海龍珠 Lua 資源，再執行下列 GM 安裝流程。資源包 SHA-256：
+
+`EA225E2C38EF2C85EF57F419A311B843C933E7483319BE569F950EC9F96F54A1`
+
 1. 關閉所有 `StarMJ371` 與 `PearlBubbleNativeGM` 程序。
 2. 雙擊 `INSTALL.bat`。
 3. 遊戲位於 `D:\明星\StarAIO` 時直接按 Enter；否則輸入另一台電腦的完整遊戲路徑。
