@@ -24,7 +24,6 @@ internal sealed class MainForm : Form
 {
     private const int HotkeyId = 0x5042;
     private const int WmHotkey = 0x0312;
-    private readonly string root;
     private readonly string commandPath;
     private readonly string statusPath;
     private readonly Label gameState = new();
@@ -51,9 +50,10 @@ internal sealed class MainForm : Form
 
     public MainForm(string? requestedRoot)
     {
-        root = Path.GetFullPath(requestedRoot ?? AppContext.BaseDirectory);
-        commandPath = Path.Combine(root, "tmpNew", "PearlBubbleNativeGM.cmd");
-        statusPath = Path.Combine(root, "tmpNew", "PearlBubbleNativeGM.status");
+        var ipcRoot = Path.Combine(Path.GetTempPath(), "PearlBubbleNativeGM");
+        Directory.CreateDirectory(ipcRoot);
+        commandPath = Path.Combine(ipcRoot, "PearlBubbleNativeGM.cmd");
+        statusPath = Path.Combine(ipcRoot, "PearlBubbleNativeGM.status");
 
         Text = "深海龍珠 Native GM";
         ClientSize = new Size(390, 930);
@@ -108,8 +108,10 @@ internal sealed class MainForm : Form
         Controls.Add(ActionButton("藍珠佈場 +10", "VISUAL_BLUE_10", 202, 430, Color.FromArgb(3, 169, 244)));
         Controls.Add(ActionButton("白珠連射 開／關", "TOGGLE_VISUAL_WHITE_AUTO", 18, 476, Color.FromArgb(96, 125, 139)));
         Controls.Add(ActionButton("龍頭彈射藍珠", "VISUAL_SHOOT_BLUE", 202, 476, Color.FromArgb(2, 136, 209)));
-        var officialBlue = ActionButton("正式藍珠測試（扣1發）", "OFFICIAL_BLUE_PROBE", 18, 522, Color.FromArgb(0, 105, 92));
-        officialBlue.Width = 356;
+        var officialWhite = ActionButton("正式白珠 +1（扣1發）", "OFFICIAL_WHITE_TABLE_PROBE", 18, 522, Color.FromArgb(0, 121, 107));
+        officialWhite.Click += (_, _) => BeginOfficialBlueCooldown(officialWhite);
+        Controls.Add(officialWhite);
+        var officialBlue = ActionButton("正式藍珠測試（扣1發）", "OFFICIAL_BLUE_PROBE", 202, 522, Color.FromArgb(0, 105, 92));
         officialBlue.Click += (_, _) => BeginOfficialBlueCooldown(officialBlue);
         Controls.Add(officialBlue);
 
@@ -216,6 +218,12 @@ internal sealed class MainForm : Form
     {
         try
         {
+            if (!File.Exists(statusPath)
+                || DateTime.UtcNow - File.GetLastWriteTimeUtc(statusPath) > TimeSpan.FromSeconds(5))
+            {
+                bridgeState.Text = "命令未送出：遊戲橋接未連線";
+                return;
+            }
             Directory.CreateDirectory(Path.GetDirectoryName(commandPath)!);
             var nonce = $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Interlocked.Increment(ref serial)}";
             var temporary = commandPath + ".tmp";
@@ -291,6 +299,10 @@ internal sealed class MainForm : Form
             values.TryGetValue("dragon_sync_verify", out var dragonSyncVerify);
             values.TryGetValue("dragon_sync_index", out var dragonSyncIndex);
             values.TryGetValue("dragon_sync_reject_count", out var dragonSyncRejectCount);
+            values.TryGetValue("official_white_state", out var officialWhiteState);
+            values.TryGetValue("official_white_expected_reward", out var officialWhiteExpectedReward);
+            values.TryGetValue("official_white_expected_net", out var officialWhiteExpectedNet);
+            values.TryGetValue("official_white_server_delta", out var officialWhiteServerDelta);
             bridgeState.Text = $"橋接：{state ?? "unknown"}　{detail ?? ""}";
             var persistentPathName = persistentPath switch
             {
@@ -317,7 +329,9 @@ internal sealed class MainForm : Form
             pathResultState.Text = $"路徑結果：伺服器正式獎值 {RewardName(serverPathReward)}／客戶端演出路徑 {RewardName(visualPathReward)}";
             serverCodeState.Text = $"伺服器碼：{serverCode ?? "none"}　餘額差 {serverCodeAccountDelta ?? "?"}　回覆 {serverCodeRewardDelta ?? "?"}";
             var smallPearlSyncText = smallPearlSync == "local_only" ? "僅本機（未入帳）" : "等待真珠";
-            smallPearlState.Text = $"真珠結算：本顆 +{smallPearlLastValue ?? "0"}／本機累計 +{smallPearlClientCredit ?? "0"}／本機帳戶 +{smallPearlAccountDelta ?? "?"}／{smallPearlSyncText}";
+            smallPearlState.Text = officialWhiteState is not null and not "idle"
+                ? $"正式白珠：{officialWhiteState}／回獎 +{officialWhiteExpectedReward ?? "?"}／淨值 {officialWhiteExpectedNet ?? "?"}／伺服器差 {officialWhiteServerDelta ?? "?"}"
+                : $"真珠結算：本顆 +{smallPearlLastValue ?? "0"}／本機累計 +{smallPearlClientCredit ?? "0"}／本機帳戶 +{smallPearlAccountDelta ?? "?"}／{smallPearlSyncText}";
             dragonSyncState.Text = $"龍珠同步：{dragonSyncVerify ?? "none"}／序號 {dragonSyncIndex ?? "?"}／拒絕 {dragonSyncRejectCount ?? "0"}";
         }
         catch (Exception ex)

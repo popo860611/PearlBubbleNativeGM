@@ -276,6 +276,29 @@ class NativeMenuContractTests(unittest.TestCase):
         self.assertIn("BeginOfficialBlueCooldown", controller)
         self.assertIn("await Task.Delay(10000)", controller)
 
+    def test_official_white_table_probe_uses_paid_shot_and_authoritative_sync(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        self.assertIn("local function requestOfficialWhitePearlOnTable()", bridge)
+        self.assertIn("gameCtrl:shootPearl()", bridge)
+        self.assertIn("officialWhiteTags[ballTag] = true", bridge)
+        self.assertIn("targetBall:setPosition3D", bridge)
+        self.assertIn("officialWhiteFireSyncIndex", bridge)
+        self.assertIn("officialWhiteDropSyncIndex", bridge)
+        self.assertIn('appendEvent("official_white_created"', bridge)
+        self.assertIn('appendEvent("official_white_drop_ack"', bridge)
+        self.assertIn('appendEvent("official_white_balance"', bridge)
+        self.assertIn('command == "OFFICIAL_WHITE_TABLE_PROBE"', bridge)
+        self.assertIn('"正式白珠 +1（扣1發）", "OFFICIAL_WHITE_TABLE_PROBE"', controller)
+        self.assertIn('TryGetValue("official_white_state"', controller)
+
+    def test_official_white_probe_confirms_from_server_refreshed_reentry_balance(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        self.assertIn('NativeGMBridge.officialWhiteState == "drop_verified"', bridge)
+        self.assertIn("tonumber(syncIndex) == 0", bridge)
+        self.assertIn("official_white_reentry_balance", bridge)
+        self.assertIn("official white pearl persisted after room re-entry", bridge)
+
     def test_unsafe_server_settled_small_pearl_buttons_are_not_exposed(self):
         bridge = BRIDGE.read_text(encoding="utf-8")
         controller = PROGRAM.read_text(encoding="utf-8")
@@ -341,7 +364,9 @@ class NativeMenuContractTests(unittest.TestCase):
 
     def test_passive_timeline_hooks_the_real_model_send_and_receive_boundaries(self):
         text = BRIDGE.read_text(encoding="utf-8")
-        self.assertIn('local TIMELINE_LOG_PATH = "./tmpNew/PearlBubbleNativeGM.timeline.log"', text)
+        self.assertIn('local TEMP_ROOT = (os.getenv("TEMP")', text)
+        self.assertIn('local IPC_ROOT = TEMP_ROOT .. "/PearlBubbleNativeGM"', text)
+        self.assertIn('local TIMELINE_LOG_PATH = IPC_ROOT .. "/PearlBubbleNativeGM.timeline.log"', text)
         self.assertIn("originalModelSendLuaCommand", text)
         self.assertIn("originalModelOnCommand", text)
         self.assertIn("PearlBubbleModel.SendLuaCommand = function(self, cmd, content)", text)
@@ -350,6 +375,19 @@ class NativeMenuContractTests(unittest.TestCase):
         self.assertIn('appendTimeline("RECV", commandType, content)', text)
         self.assertIn("PearlBubbleModel.SendLuaCommand = self.originalModelSendLuaCommand", text)
         self.assertIn("PearlBubbleModel.OnCommand = self.originalModelOnCommand", text)
+
+    def test_controller_and_bridge_share_writable_temp_ipc(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        self.assertIn('os.getenv("TEMP")', bridge)
+        self.assertIn('Path.Combine(Path.GetTempPath(), "PearlBubbleNativeGM")', controller)
+        self.assertIn('DateTime.UtcNow - File.GetLastWriteTimeUtc(statusPath)', controller)
+        self.assertIn('命令未送出：遊戲橋接未連線', controller)
+        runtime_check = (ROOT / "CHECK_RUNTIME.bat").read_text(encoding="utf-8")
+        self.assertIn(r"%TEMP%\PearlBubbleNativeGM", runtime_check)
+        self.assertIn("BRIDGE NOT CONNECTED", runtime_check)
+        updater = (ROOT / "UPDATE.bat").read_text(encoding="utf-8")
+        self.assertIn('call "%~dp0INSTALL.bat"', updater)
 
     def test_passive_timeline_serializes_the_parsed_protocol_structures(self):
         text = BRIDGE.read_text(encoding="utf-8")

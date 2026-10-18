@@ -1,9 +1,15 @@
 local NativeGMBridge = {}
 
-local COMMAND_PATH = "./tmpNew/PearlBubbleNativeGM.cmd"
-local STATUS_PATH = "./tmpNew/PearlBubbleNativeGM.status"
-local EVENT_LOG_PATH = "./tmpNew/PearlBubbleNativeGM.events.log"
-local TIMELINE_LOG_PATH = "./tmpNew/PearlBubbleNativeGM.timeline.log"
+-- Never use the game folder for IPC. Other installations commonly live under
+-- Program Files, where the normally launched game cannot write files even
+-- though the elevated installer and GM window can. TEMP is writable by both
+-- processes for the signed-in user and is independent of the game working dir.
+local TEMP_ROOT = (os.getenv("TEMP") or os.getenv("TMP") or "."):gsub("\\", "/")
+local IPC_ROOT = TEMP_ROOT .. "/PearlBubbleNativeGM"
+local COMMAND_PATH = IPC_ROOT .. "/PearlBubbleNativeGM.cmd"
+local STATUS_PATH = IPC_ROOT .. "/PearlBubbleNativeGM.status"
+local EVENT_LOG_PATH = IPC_ROOT .. "/PearlBubbleNativeGM.events.log"
+local TIMELINE_LOG_PATH = IPC_ROOT .. "/PearlBubbleNativeGM.timeline.log"
 
 NativeGMBridge.lastNonce = ""
 NativeGMBridge.nextRewardType = nil
@@ -30,6 +36,17 @@ NativeGMBridge.pendingOfficialPearlSyncIndex = nil
 NativeGMBridge.officialBlueLocked = false
 NativeGMBridge.officialBlueOutstanding = 0
 NativeGMBridge.officialBlueFinalSyncIndex = nil
+NativeGMBridge.officialWhiteTags = {}
+NativeGMBridge.officialWhiteLocked = false
+NativeGMBridge.officialWhiteTag = "none"
+NativeGMBridge.officialWhiteFireSyncIndex = nil
+NativeGMBridge.officialWhiteDropSyncIndex = nil
+NativeGMBridge.officialWhiteState = "idle"
+NativeGMBridge.officialWhiteBet = 0
+NativeGMBridge.officialWhiteExpectedReward = 0
+NativeGMBridge.officialWhiteExpectedNet = 0
+NativeGMBridge.officialWhiteAccountBefore = "unknown"
+NativeGMBridge.officialWhiteServerDelta = "unknown"
 NativeGMBridge.statusPollCount = 0
 NativeGMBridge.lastState = "unknown"
 NativeGMBridge.lastDetail = ""
@@ -354,6 +371,25 @@ local function writeStatus(state, detail)
     end
     local gameMain = dinoBall and dinoBall.gameMain or nil
     local syncIndex = gameMain and gameMain.syncGameIndex or "unknown"
+    -- A room re-entry resets the per-room sync index and refreshes the account
+    -- model from the server. Confirm only when that refreshed balance preserves
+    -- the exact expected net change from the authorized one-shot probe.
+    if NativeGMBridge.officialWhiteState == "drop_verified"
+        and tonumber(syncIndex) == 0
+        and tonumber(NativeGMBridge.officialWhiteAccountBefore) ~= nil
+        and tonumber(NativeGMBridge.officialWhiteExpectedNet) ~= nil
+        and accountNow ~= nil then
+        local reentryDelta = accountNow - tonumber(NativeGMBridge.officialWhiteAccountBefore)
+        NativeGMBridge.officialWhiteServerDelta = reentryDelta
+        if math.abs(reentryDelta - tonumber(NativeGMBridge.officialWhiteExpectedNet)) < 0.0001 then
+            NativeGMBridge.officialWhiteState = "confirmed"
+            NativeGMBridge.lastState = "server_settled"
+            NativeGMBridge.lastDetail = "official white pearl persisted after room re-entry"
+            appendEvent("official_white_reentry_balance", "confirmed=true,delta=" .. tostring(reentryDelta)
+                .. ",expected_net=" .. tostring(NativeGMBridge.officialWhiteExpectedNet)
+                .. ",balance=" .. tostring(accountBalance))
+        end
+    end
     file:write("state=" .. tostring(NativeGMBridge.lastState) .. "\n")
     file:write("detail=" .. tostring(NativeGMBridge.lastDetail) .. "\n")
     file:write("pending=" .. (pending == nil and "none" or tostring(pending)) .. "\n")
@@ -374,6 +410,12 @@ local function writeStatus(state, detail)
     file:write("visual_white_auto=" .. (NativeGMBridge.visualWhiteAutoEnabled and "on" or "off") .. "\n")
     file:write("official_blue_locked=" .. (NativeGMBridge.officialBlueLocked and "on" or "off") .. "\n")
     file:write("official_blue_outstanding=" .. tostring(NativeGMBridge.officialBlueOutstanding) .. "\n")
+    file:write("official_white_state=" .. tostring(NativeGMBridge.officialWhiteState) .. "\n")
+    file:write("official_white_tag=" .. tostring(NativeGMBridge.officialWhiteTag) .. "\n")
+    file:write("official_white_bet=" .. tostring(NativeGMBridge.officialWhiteBet) .. "\n")
+    file:write("official_white_expected_reward=" .. tostring(NativeGMBridge.officialWhiteExpectedReward) .. "\n")
+    file:write("official_white_expected_net=" .. tostring(NativeGMBridge.officialWhiteExpectedNet) .. "\n")
+    file:write("official_white_server_delta=" .. tostring(NativeGMBridge.officialWhiteServerDelta) .. "\n")
     file:write("server_code=" .. tostring(NativeGMBridge.lastServerCode) .. "\n")
     file:write("server_code_sent_at=" .. tostring(NativeGMBridge.serverCodeSentAt) .. "\n")
     file:write("server_code_account_before=" .. tostring(NativeGMBridge.serverCodeAccountBefore) .. "\n")
@@ -428,6 +470,26 @@ local function installDiagnostics()
                 NativeGMBridge.lastServerSub = data.subNum or "unknown"
             end
             local result = NativeGMBridge.originalOnSyncConeyAck(self, data)
+            if NativeGMBridge.officialWhiteState == "drop_verified"
+                and data ~= nil and tonumber(data.finalNum) ~= nil
+                and tonumber(NativeGMBridge.officialWhiteAccountBefore) ~= nil then
+                local delta = tonumber(data.finalNum) - tonumber(NativeGMBridge.officialWhiteAccountBefore)
+                NativeGMBridge.officialWhiteServerDelta = delta
+                local expected = tonumber(NativeGMBridge.officialWhiteExpectedNet)
+                if expected ~= nil and math.abs(delta - expected) < 0.0001 then
+                    NativeGMBridge.officialWhiteState = "confirmed"
+                    appendEvent("official_white_balance", "confirmed=true,delta=" .. tostring(delta)
+                        .. ",expected_net=" .. tostring(expected)
+                        .. ",final=" .. tostring(data.finalNum))
+                    writeStatus("server_settled", "official white pearl credited")
+                else
+                    NativeGMBridge.officialWhiteState = "balance_mismatch"
+                    appendEvent("official_white_balance", "confirmed=false,delta=" .. tostring(delta)
+                        .. ",expected_net=" .. tostring(expected)
+                        .. ",final=" .. tostring(data.finalNum))
+                    writeStatus("server_mismatch", "official white pearl balance mismatch")
+                end
+            end
             appendEvent("server_sync", "final=" .. tostring(NativeGMBridge.lastServerFinal)
                 .. ",add=" .. tostring(NativeGMBridge.lastServerAdd)
                 .. ",sub=" .. tostring(NativeGMBridge.lastServerSub)
@@ -483,6 +545,38 @@ local function installDiagnostics()
                 else
                     appendEvent("official_blue_settled", "verify=false,index=" .. tostring(ackIndex))
                     writeStatus("server_rejected", "official blue pearl settlement rejected")
+                end
+            end
+            if NativeGMBridge.officialWhiteFireSyncIndex ~= nil
+                and ackIndex == NativeGMBridge.officialWhiteFireSyncIndex then
+                NativeGMBridge.officialWhiteFireSyncIndex = nil
+                if verified then
+                    NativeGMBridge.officialWhiteState = "fire_verified"
+                    appendEvent("official_white_fire_ack", "verify=true,index=" .. tostring(ackIndex)
+                        .. ",ball_tag=" .. tostring(NativeGMBridge.officialWhiteTag))
+                    writeStatus("server_verified", "official white pearl is on table")
+                else
+                    NativeGMBridge.officialWhiteState = "rejected"
+                    NativeGMBridge.officialWhiteLocked = false
+                    NativeGMBridge.officialWhiteTags = {}
+                    appendEvent("official_white_fire_ack", "verify=false,index=" .. tostring(ackIndex))
+                    writeStatus("server_rejected", "official white pearl fire rejected")
+                end
+            end
+            if NativeGMBridge.officialWhiteDropSyncIndex ~= nil
+                and ackIndex == NativeGMBridge.officialWhiteDropSyncIndex then
+                NativeGMBridge.officialWhiteDropSyncIndex = nil
+                NativeGMBridge.officialWhiteLocked = false
+                if verified then
+                    NativeGMBridge.officialWhiteState = "drop_verified"
+                    appendEvent("official_white_drop_ack", "verify=true,index=" .. tostring(ackIndex)
+                        .. ",expected_reward=" .. tostring(NativeGMBridge.officialWhiteExpectedReward)
+                        .. ",expected_net=" .. tostring(NativeGMBridge.officialWhiteExpectedNet))
+                    writeStatus("server_pending", "drop verified; waiting authoritative balance")
+                else
+                    NativeGMBridge.officialWhiteState = "rejected"
+                    appendEvent("official_white_drop_ack", "verify=false,index=" .. tostring(ackIndex))
+                    writeStatus("server_rejected", "official white pearl drop rejected")
                 end
             end
             return result
@@ -553,6 +647,18 @@ local function installDiagnostics()
                 and NativeGMBridge.officialBlueLocked
                 and NativeGMBridge.officialBlueOutstanding > 0
             local result = NativeGMBridge.originalOnDwonTrigger(self, ballType, ballPos, ballTag, dropItemInfo)
+            if NativeGMBridge.officialWhiteTags[ballTag] then
+                NativeGMBridge.officialWhiteTags[ballTag] = nil
+                NativeGMBridge.officialWhiteState = "drop_pending"
+                appendEvent("official_white_drop", "ball_tag=" .. tostring(ballTag)
+                    .. ",expected_reward=" .. tostring(NativeGMBridge.officialWhiteExpectedReward)
+                    .. ",expected_net=" .. tostring(NativeGMBridge.officialWhiteExpectedNet))
+                if gameMain.Net_SyncGameState ~= nil then
+                    NativeGMBridge.officialWhiteDropSyncIndex = gameMain.syncGameIndex + 1
+                    gameMain:Net_SyncGameState(true)
+                    writeStatus("server_pending", "official white pearl drop sent")
+                end
+            end
             if isOfficialBlue then
                 NativeGMBridge.officialBlueOutstanding = NativeGMBridge.officialBlueOutstanding - 1
                 appendEvent("official_blue_drop", "ball_tag=" .. tostring(ballTag)
@@ -871,6 +977,71 @@ local function requestOfficialBluePearls()
     writeStatus("server_pending", "official blue pearl probe sent")
 end
 
+-- Authorized single-shot settlement probe.  A normal paid shot creates the
+-- server-tracked ball index and debit event; only its client physics position
+-- is moved onto the pusher table.  The drop then follows the stock callback,
+-- state-sync and authoritative balance paths.
+local function requestOfficialWhitePearlOnTable()
+    if NativeGMBridge.officialWhiteLocked then
+        writeStatus("waiting", "official white pearl probe still active")
+        return
+    end
+    local gameMain = dinoBall and dinoBall.gameMain or nil
+    local gameCtrl = gameMain and gameMain.gameView and gameMain.gameView.gameCtrl or nil
+    local machine = gameMain and gameMain.gameView and gameMain.gameView.machine or nil
+    local define = dinoBall and dinoBall.Define or nil
+    if gameMain == nil or gameCtrl == nil or machine == nil or define == nil
+        or gameCtrl.shootPearl == nil or gameMain.Net_SyncGameState == nil
+        or machine.ballRoot == nil then
+        writeStatus("not_ready", "official white pearl flow unavailable")
+        return
+    end
+
+    NativeGMBridge.visualWhiteAutoEnabled = false
+    NativeGMBridge.officialWhiteLocked = true
+    NativeGMBridge.officialWhiteState = "creating"
+    NativeGMBridge.officialWhiteBet = tonumber(gameCtrl.bet or gameMain.currenctBet) or 0
+    NativeGMBridge.officialWhiteExpectedReward =
+        (tonumber(define.PearlDefine.GetPropertyPercent) or 0)
+        * NativeGMBridge.officialWhiteBet / 100
+    NativeGMBridge.officialWhiteExpectedNet = NativeGMBridge.officialWhiteExpectedReward
+        - NativeGMBridge.officialWhiteBet
+    NativeGMBridge.officialWhiteAccountBefore = readAccountBalance()
+    NativeGMBridge.officialWhiteServerDelta = "unknown"
+
+    local shotOk = gameCtrl:shootPearl()
+    if not shotOk then
+        NativeGMBridge.officialWhiteLocked = false
+        NativeGMBridge.officialWhiteState = "not_ready"
+        writeStatus("not_ready", "paid white shot was not accepted locally")
+        return
+    end
+
+    local ballTag = machine.ballTag
+    local targetBall = nil
+    for _, ball in pairs(machine.ballRoot:getChildren()) do
+        if ball.getTag ~= nil and ball:getTag() == ballTag then
+            targetBall = ball
+            break
+        end
+    end
+    NativeGMBridge.officialWhiteTag = ballTag
+    NativeGMBridge.officialWhiteTags[ballTag] = true
+    if targetBall ~= nil and targetBall.setPosition3D ~= nil then
+        targetBall:setPosition3D(cc.vec3(-12, 39.1, -2.5))
+    end
+
+    NativeGMBridge.officialWhiteState = "fire_pending"
+    NativeGMBridge.officialWhiteFireSyncIndex = gameMain.syncGameIndex + 1
+    appendEvent("official_white_created", "ball_tag=" .. tostring(ballTag)
+        .. ",bet=" .. tostring(NativeGMBridge.officialWhiteBet)
+        .. ",expected_reward=" .. tostring(NativeGMBridge.officialWhiteExpectedReward)
+        .. ",expected_net=" .. tostring(NativeGMBridge.officialWhiteExpectedNet)
+        .. ",relocated=" .. tostring(targetBall ~= nil))
+    gameMain:Net_SyncGameState(true)
+    writeStatus("server_pending", "paid white pearl moved onto table")
+end
+
 local function addBall(ballType, label)
     local machine = getMachine()
     if machine == nil or machine.addBonusDraBall == nil or machine.createBonusDraBall == nil then
@@ -995,6 +1166,8 @@ local function dispatch(command)
             .. (NativeGMBridge.visualWhiteAutoEnabled and "on" or "off"))
     elseif command == "OFFICIAL_BLUE_PROBE" then
         requestOfficialBluePearls()
+    elseif command == "OFFICIAL_WHITE_TABLE_PROBE" then
+        requestOfficialWhitePearlOnTable()
     elseif command == "PATH_0" then
         NativeGMBridge.nextRewardType = 0
         writeStatus("armed", "next path=none")
@@ -1077,6 +1250,17 @@ function NativeGMBridge:Start()
     self.officialBlueLocked = false
     self.officialBlueOutstanding = 0
     self.officialBlueFinalSyncIndex = nil
+    self.officialWhiteTags = {}
+    self.officialWhiteLocked = false
+    self.officialWhiteTag = "none"
+    self.officialWhiteFireSyncIndex = nil
+    self.officialWhiteDropSyncIndex = nil
+    self.officialWhiteState = "idle"
+    self.officialWhiteBet = 0
+    self.officialWhiteExpectedReward = 0
+    self.officialWhiteExpectedNet = 0
+    self.officialWhiteAccountBefore = readAccountBalance()
+    self.officialWhiteServerDelta = "unknown"
     self.smallPearlDropCount = 0
     self.smallPearlLastValue = 0
     self.smallPearlClientCredit = 0
@@ -1103,6 +1287,17 @@ function NativeGMBridge:Stop()
     self.officialBlueLocked = false
     self.officialBlueOutstanding = 0
     self.officialBlueFinalSyncIndex = nil
+    self.officialWhiteTags = {}
+    self.officialWhiteLocked = false
+    self.officialWhiteTag = "none"
+    self.officialWhiteFireSyncIndex = nil
+    self.officialWhiteDropSyncIndex = nil
+    self.officialWhiteState = "idle"
+    self.officialWhiteBet = 0
+    self.officialWhiteExpectedReward = 0
+    self.officialWhiteExpectedNet = 0
+    self.officialWhiteAccountBefore = "unknown"
+    self.officialWhiteServerDelta = "unknown"
     if self.scheduleId ~= nil then
         cc.Director:getInstance():getScheduler():unscheduleScriptEntry(self.scheduleId)
         self.scheduleId = nil
