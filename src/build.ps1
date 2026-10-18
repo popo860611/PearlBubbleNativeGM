@@ -1,17 +1,12 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$DotNetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
-$FallbackDotNet = 'D:\tool\dnSpy\32\.dotnet\dotnet.exe'
+$Workspace = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$DotNet = 'D:\tool\dnSpy\32\.dotnet\dotnet.exe'
 $Project = Join-Path $PSScriptRoot 'PearlBubbleNativeGM.csproj'
-$Output = Join-Path $RepoRoot 'dist\PearlBubbleNativeGM'
+$Output = Join-Path $Workspace 'outputs\PearlBubbleNativeGM'
 
-if ($DotNetCommand) {
-    $DotNet = $DotNetCommand.Source
-} elseif (Test-Path -LiteralPath $FallbackDotNet) {
-    $DotNet = $FallbackDotNet
-} else {
-    throw '找不到 .NET 8 SDK；請安裝 .NET 8 SDK 後再建置。'
+if (-not (Test-Path -LiteralPath $DotNet)) {
+    throw "Bundled .NET SDK not found: $DotNet"
 }
 
 & $DotNet publish $Project `

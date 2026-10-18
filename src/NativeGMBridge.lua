@@ -3,6 +3,7 @@ local NativeGMBridge = {}
 local COMMAND_PATH = "./tmpNew/PearlBubbleNativeGM.cmd"
 local STATUS_PATH = "./tmpNew/PearlBubbleNativeGM.status"
 local EVENT_LOG_PATH = "./tmpNew/PearlBubbleNativeGM.events.log"
+local TIMELINE_LOG_PATH = "./tmpNew/PearlBubbleNativeGM.timeline.log"
 
 NativeGMBridge.lastNonce = ""
 NativeGMBridge.nextRewardType = nil
@@ -18,6 +19,17 @@ NativeGMBridge.originalAddBonusDraBall = nil
 NativeGMBridge.originalOnEventBallDropDwon = nil
 NativeGMBridge.originalOnDraBallTrigger = nil
 NativeGMBridge.originalGameCtrlAddProperty = nil
+NativeGMBridge.originalOnDwonTrigger = nil
+NativeGMBridge.originalOnPartyTrigger = nil
+NativeGMBridge.originalOnSyncGameStateAckV2 = nil
+NativeGMBridge.visualPearlTags = {}
+NativeGMBridge.visualWhiteAutoEnabled = false
+NativeGMBridge.visualWhiteAutoTicks = 0
+NativeGMBridge.visualWhiteAutoMaxPearls = 60
+NativeGMBridge.pendingOfficialPearlSyncIndex = nil
+NativeGMBridge.officialBlueLocked = false
+NativeGMBridge.officialBlueOutstanding = 0
+NativeGMBridge.officialBlueFinalSyncIndex = nil
 NativeGMBridge.statusPollCount = 0
 NativeGMBridge.lastState = "unknown"
 NativeGMBridge.lastDetail = ""
@@ -35,11 +47,219 @@ NativeGMBridge.serverCodeAccountBefore = "unknown"
 NativeGMBridge.serverCodeRewardSerialBefore = 0
 NativeGMBridge.serverCodeSentAt = "unknown"
 NativeGMBridge.rewardCreditSerial = 0
+NativeGMBridge.originalModelSendLuaCommand = nil
+NativeGMBridge.originalModelOnCommand = nil
+NativeGMBridge.timelineSequence = 0
+NativeGMBridge.timelineStartClock = 0
+NativeGMBridge.smallPearlDropCount = 0
+NativeGMBridge.smallPearlClientCredit = 0
+NativeGMBridge.smallPearlAccountBase = "unknown"
+NativeGMBridge.lastGameStateVerify = "none"
+NativeGMBridge.lastGameStateAckIndex = "unknown"
+NativeGMBridge.gameStateRejectCount = 0
+
+-- Only protocol fields already decoded by the shipped client are observed.
+-- This avoids guessing at a raw buffer format that is not exposed here.
+local timelineProtocolFields = {
+    SEND = {
+        [15] = { "index", "canEnterDraHoleCount", "list", "draballList" },
+        [51] = { "code" },
+    },
+    RECV = {
+        [2] = { "plateIndex", "maxBet", "roomBaseData" },
+        [5] = { "finalNum", "addNum", "subNum" },
+        [9] = { "currentSoulNum", "fallIndex", "bgDataList" },
+        [15] = { "verifyOk", "index", "bgDataList", "jpBall", "jpInfo" },
+        [31] = { "changeAmount", "currentMoney" },
+        [52] = { "buffer", "soulBuffer" },
+    },
+}
+
+local timelineVectorFields = {
+    list = { "eventType", "subType", "ballIndex", "extraInfo" },
+    draballList = { "ballType", "x", "y", "z" },
+    bgDataList = { "ballType", "holeType", "currentSoulNum", "broadcastIndex" },
+}
 
 -- requireWithClearLoaded() does not reliably forward a module return value in
 -- this client, so publish the bridge before Start() is requested by main.lua.
 if dinoBall ~= nil then
     dinoBall.NativeGMBridge = NativeGMBridge
+end
+
+local function timelineEscape(value)
+    local text = tostring(value)
+    text = string.gsub(text, "\\", "\\\\")
+    text = string.gsub(text, "|", "\\p")
+    text = string.gsub(text, "\r", "\\r")
+    text = string.gsub(text, "\n", "\\n")
+    return text
+end
+
+local function timelineReadField(value, field)
+    if value == nil then
+        return nil
+    end
+    local ok, result = pcall(function()
+        return value[field]
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function timelineSerializeSimple(value, depth)
+    if value == nil then
+        return "nil"
+    end
+    local valueType = type(value)
+    if valueType == "number" or valueType == "boolean" or valueType == "string" then
+        return timelineEscape(value)
+    end
+    if valueType ~= "table" or depth >= 2 then
+        return timelineEscape(value)
+    end
+
+    local parts = {}
+    local count = 0
+    for key, child in pairs(value) do
+        count = count + 1
+        if count > 32 then
+            table.insert(parts, "...")
+            break
+        end
+        table.insert(parts, timelineEscape(key) .. ":" .. timelineSerializeSimple(child, depth + 1))
+    end
+    table.sort(parts)
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+local function timelineSerializeObject(value, fields)
+    if value == nil then
+        return "nil"
+    end
+    local parts = {}
+    for _, field in ipairs(fields) do
+        local child = timelineReadField(value, field)
+        if child ~= nil then
+            table.insert(parts, field .. "=" .. timelineSerializeSimple(child, 0))
+        end
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+local function timelineSerializeVector(value, itemFields)
+    if value == nil then
+        return "nil"
+    end
+    if type(value) ~= "table" then
+        return timelineEscape(value)
+    end
+    local parts = {}
+    local count = 0
+    for index, item in pairs(value) do
+        count = count + 1
+        if count > 64 then
+            table.insert(parts, "...")
+            break
+        end
+        table.insert(parts, tostring(index) .. ":" .. timelineSerializeObject(item, itemFields))
+    end
+    table.sort(parts)
+    return "[" .. table.concat(parts, ",") .. "]"
+end
+
+local function timelineSerializeContent(direction, opcode, content)
+    local directionFields = timelineProtocolFields[direction]
+    local fields = directionFields and directionFields[opcode] or nil
+    if fields == nil then
+        return content == nil and "nil" or "present"
+    end
+    local parts = {}
+    for _, field in ipairs(fields) do
+        local value = timelineReadField(content, field)
+        if value ~= nil then
+            local vectorFields = timelineVectorFields[field]
+            local encoded = vectorFields ~= nil
+                and timelineSerializeVector(value, vectorFields)
+                or timelineSerializeSimple(value, 0)
+            table.insert(parts, field .. "=" .. encoded)
+        end
+    end
+    return table.concat(parts, ",")
+end
+
+local function timelineOpcodeName(direction, opcode)
+    local protocol = dinoBall and dinoBall.Protocol or nil
+    local commands = protocol and (direction == "SEND"
+        and protocol.DINOBALL_U2G_PROTOCOL or protocol.DINOBALL_G2U_PROTOCOL) or nil
+    if commands ~= nil then
+        for name, value in pairs(commands) do
+            if value == opcode then
+                return name
+            end
+        end
+    end
+    return "UNKNOWN"
+end
+
+local function appendTimeline(direction, opcode, content)
+    NativeGMBridge.timelineSequence = NativeGMBridge.timelineSequence + 1
+    local elapsedMs = math.floor((os.clock() - NativeGMBridge.timelineStartClock) * 1000 + 0.5)
+    local file = io.open(TIMELINE_LOG_PATH, "a")
+    if file == nil then
+        return
+    end
+    file:write(tostring(NativeGMBridge.timelineSequence)
+        .. "|" .. tostring(os.time())
+        .. "|" .. tostring(elapsedMs)
+        .. "|" .. tostring(direction)
+        .. "|" .. tostring(opcode)
+        .. "|" .. timelineEscape(timelineOpcodeName(direction, opcode))
+        .. "|" .. timelineSerializeContent(direction, opcode, content)
+        .. "\n")
+    file:close()
+end
+
+local function startTimeline()
+    NativeGMBridge.timelineSequence = 0
+    NativeGMBridge.timelineStartClock = os.clock()
+    local file = io.open(TIMELINE_LOG_PATH, "w")
+    if file ~= nil then
+        file:write("seq|unix_s|elapsed_ms|direction|opcode|name|data\n")
+        file:close()
+    end
+end
+
+local function installPassiveTimeline()
+    if PearlBubbleModel == nil then
+        return false
+    end
+    if NativeGMBridge.originalModelSendLuaCommand == nil
+        and PearlBubbleModel.SendLuaCommand ~= nil then
+        NativeGMBridge.originalModelSendLuaCommand = PearlBubbleModel.SendLuaCommand
+        PearlBubbleModel.SendLuaCommand = function(self, cmd, content)
+            pcall(function()
+                appendTimeline("SEND", cmd, content)
+            end)
+            return NativeGMBridge.originalModelSendLuaCommand(self, cmd, content)
+        end
+    end
+    if NativeGMBridge.originalModelOnCommand == nil
+        and PearlBubbleModel.OnCommand ~= nil then
+        NativeGMBridge.originalModelOnCommand = PearlBubbleModel.OnCommand
+        PearlBubbleModel.OnCommand = function(self, luaCommand)
+            local commandType = luaCommand and luaCommand.commandType or nil
+            local content = luaCommand and luaCommand.content or nil
+            pcall(function()
+                appendTimeline("RECV", commandType, content)
+            end)
+            return NativeGMBridge.originalModelOnCommand(self, luaCommand)
+        end
+    end
+    return NativeGMBridge.originalModelSendLuaCommand ~= nil
+        and NativeGMBridge.originalModelOnCommand ~= nil
 end
 
 local function readAccountBalance()
@@ -119,6 +339,12 @@ local function writeStatus(state, detail)
     end
     local serverCodeRewardDelta = NativeGMBridge.serverRewardSerial
         - NativeGMBridge.serverCodeRewardSerialBefore
+    local pearlAccountBase = tonumber(NativeGMBridge.smallPearlAccountBase)
+    local pearlAccountNow = tonumber(accountBalance)
+    local smallPearlAccountDelta = "unknown"
+    if pearlAccountBase ~= nil and pearlAccountNow ~= nil then
+        smallPearlAccountDelta = pearlAccountNow - pearlAccountBase
+    end
     local gameMain = dinoBall and dinoBall.gameMain or nil
     local syncIndex = gameMain and gameMain.syncGameIndex or "unknown"
     file:write("state=" .. tostring(NativeGMBridge.lastState) .. "\n")
@@ -138,11 +364,20 @@ local function writeStatus(state, detail)
     file:write("server_reward_types=" .. tostring(NativeGMBridge.lastServerRewardTypes) .. "\n")
     file:write("server_path_reward=" .. tostring(NativeGMBridge.lastServerPathReward) .. "\n")
     file:write("visual_path_reward=" .. tostring(NativeGMBridge.lastVisualPathReward) .. "\n")
+    file:write("visual_white_auto=" .. (NativeGMBridge.visualWhiteAutoEnabled and "on" or "off") .. "\n")
+    file:write("official_blue_locked=" .. (NativeGMBridge.officialBlueLocked and "on" or "off") .. "\n")
+    file:write("official_blue_outstanding=" .. tostring(NativeGMBridge.officialBlueOutstanding) .. "\n")
     file:write("server_code=" .. tostring(NativeGMBridge.lastServerCode) .. "\n")
     file:write("server_code_sent_at=" .. tostring(NativeGMBridge.serverCodeSentAt) .. "\n")
     file:write("server_code_account_before=" .. tostring(NativeGMBridge.serverCodeAccountBefore) .. "\n")
     file:write("server_code_account_delta=" .. tostring(serverCodeAccountDelta) .. "\n")
     file:write("server_code_reward_delta=" .. tostring(serverCodeRewardDelta) .. "\n")
+    file:write("small_pearl_drop_count=" .. tostring(NativeGMBridge.smallPearlDropCount) .. "\n")
+    file:write("small_pearl_client_credit=" .. tostring(NativeGMBridge.smallPearlClientCredit) .. "\n")
+    file:write("small_pearl_account_delta=" .. tostring(smallPearlAccountDelta) .. "\n")
+    file:write("dragon_sync_verify=" .. tostring(NativeGMBridge.lastGameStateVerify) .. "\n")
+    file:write("dragon_sync_index=" .. tostring(NativeGMBridge.lastGameStateAckIndex) .. "\n")
+    file:write("dragon_sync_reject_count=" .. tostring(NativeGMBridge.gameStateRejectCount) .. "\n")
     file:close()
     os.remove(STATUS_PATH)
     os.rename(STATUS_PATH .. ".tmp", STATUS_PATH)
@@ -190,6 +425,57 @@ local function installDiagnostics()
                 .. ",local_balance=" .. tostring(readLocalBalance())
                 .. ",account_balance=" .. tostring(readAccountBalance()))
             writeStatus("server_sync", "authoritative balance received")
+            return result
+        end
+    end
+    if gameMain ~= nil and NativeGMBridge.originalOnSyncGameStateAckV2 == nil
+        and gameMain.OnSyncGameStateAckV2 ~= nil then
+        NativeGMBridge.originalOnSyncGameStateAckV2 = gameMain.OnSyncGameStateAckV2
+        gameMain.OnSyncGameStateAckV2 = function(self, data)
+            local pendingIndex = NativeGMBridge.pendingOfficialPearlSyncIndex
+            local ackIndex = data and data.index or nil
+            local verified = data and data.verifyOk or false
+            NativeGMBridge.lastGameStateVerify = verified and "true" or "false"
+            NativeGMBridge.lastGameStateAckIndex = ackIndex or "unknown"
+            if not verified then
+                NativeGMBridge.gameStateRejectCount = NativeGMBridge.gameStateRejectCount + 1
+            end
+            local result = NativeGMBridge.originalOnSyncGameStateAckV2(self, data)
+            appendEvent("dragon_sync_ack", "verify=" .. tostring(verified)
+                .. ",index=" .. tostring(ackIndex)
+                .. ",reject_count=" .. tostring(NativeGMBridge.gameStateRejectCount))
+            if pendingIndex ~= nil and ackIndex == pendingIndex then
+                NativeGMBridge.pendingOfficialPearlSyncIndex = nil
+                local gameCtrl = self.gameView and self.gameView.gameCtrl or nil
+                if verified and gameCtrl ~= nil and gameCtrl.onPearlPartyTrigger ~= nil then
+                    local count = gameCtrl:onPearlPartyTrigger()
+                    NativeGMBridge.officialBlueOutstanding = tonumber(count) or 0
+                    appendEvent("official_blue_pearl_ack", "verify=true,index=" .. tostring(ackIndex)
+                        .. ",count=" .. tostring(count))
+                    writeStatus("server_verified", "official blue pearls=" .. tostring(count))
+                    if NativeGMBridge.officialBlueOutstanding <= 0 then
+                        NativeGMBridge.officialBlueLocked = false
+                    end
+                else
+                    NativeGMBridge.officialBlueLocked = false
+                    NativeGMBridge.officialBlueOutstanding = 0
+                    appendEvent("official_blue_pearl_ack", "verify=false,index=" .. tostring(ackIndex))
+                    writeStatus("server_rejected", "official blue pearl probe rejected")
+                end
+            end
+            if NativeGMBridge.officialBlueFinalSyncIndex ~= nil
+                and ackIndex == NativeGMBridge.officialBlueFinalSyncIndex then
+                NativeGMBridge.officialBlueFinalSyncIndex = nil
+                NativeGMBridge.officialBlueLocked = false
+                if verified then
+                    appendEvent("official_blue_settled", "verify=true,index=" .. tostring(ackIndex)
+                        .. ",account=" .. tostring(readAccountBalance()))
+                    writeStatus("server_settled", "official blue pearl batch settled")
+                else
+                    appendEvent("official_blue_settled", "verify=false,index=" .. tostring(ackIndex))
+                    writeStatus("server_rejected", "official blue pearl settlement rejected")
+                end
+            end
             return result
         end
     end
@@ -243,6 +529,46 @@ local function installDiagnostics()
     end
 
     local gameCtrl = gameMain and gameMain.gameView and gameMain.gameView.gameCtrl or nil
+    if gameCtrl ~= nil and NativeGMBridge.originalOnDwonTrigger == nil
+        and gameCtrl.onDwonTrigger ~= nil then
+        NativeGMBridge.originalOnDwonTrigger = gameCtrl.onDwonTrigger
+        gameCtrl.onDwonTrigger = function(self, ballType, ballPos, ballTag, dropItemInfo)
+            if NativeGMBridge.visualPearlTags[ballTag] then
+                NativeGMBridge.visualPearlTags[ballTag] = nil
+                appendEvent("visual_pearl_drop_ignored", "ball_type=" .. tostring(ballType)
+                    .. ",ball_tag=" .. tostring(ballTag))
+                writeStatus("visual_only", "simulated pearl left table; no settlement sent")
+                return
+            end
+            local isOfficialBlue = ballType == dinoBall.Define.BallType.BonusPearl
+                and NativeGMBridge.officialBlueLocked
+                and NativeGMBridge.officialBlueOutstanding > 0
+            local result = NativeGMBridge.originalOnDwonTrigger(self, ballType, ballPos, ballTag, dropItemInfo)
+            if isOfficialBlue then
+                NativeGMBridge.officialBlueOutstanding = NativeGMBridge.officialBlueOutstanding - 1
+                appendEvent("official_blue_drop", "ball_tag=" .. tostring(ballTag)
+                    .. ",remaining=" .. tostring(NativeGMBridge.officialBlueOutstanding))
+                if NativeGMBridge.officialBlueOutstanding <= 0 and gameMain.Net_SyncGameState ~= nil then
+                    NativeGMBridge.officialBlueFinalSyncIndex = gameMain.syncGameIndex + 1
+                    gameMain:Net_SyncGameState(true)
+                    writeStatus("server_pending", "waiting for final blue pearl settlement")
+                end
+            end
+            return result
+        end
+    end
+    if gameCtrl ~= nil and NativeGMBridge.originalOnPartyTrigger == nil
+        and gameCtrl.onPartyTrigger ~= nil then
+        NativeGMBridge.originalOnPartyTrigger = gameCtrl.onPartyTrigger
+        gameCtrl.onPartyTrigger = function(self, index, triggerPos, blockGroup, ballTag, shootRot)
+            if NativeGMBridge.visualPearlTags[ballTag] then
+                appendEvent("visual_party_hole_ignored", "index=" .. tostring(index)
+                    .. ",ball_tag=" .. tostring(ballTag))
+                return
+            end
+            return NativeGMBridge.originalOnPartyTrigger(self, index, triggerPos, blockGroup, ballTag, shootRot)
+        end
+    end
     if gameCtrl ~= nil and NativeGMBridge.originalGameCtrlAddProperty == nil
         and gameCtrl.addProperty ~= nil then
         NativeGMBridge.originalGameCtrlAddProperty = gameCtrl.addProperty
@@ -259,6 +585,20 @@ local function installDiagnostics()
                 .. ",local_after=" .. tostring(localAfter)
                 .. ",account_before=" .. tostring(accountBefore)
                 .. ",account_after=" .. tostring(accountAfter))
+            if string.find(source, "白or藍珍珠掉落", 1, true) ~= nil then
+                if tonumber(NativeGMBridge.smallPearlAccountBase) == nil then
+                    NativeGMBridge.smallPearlAccountBase = accountBefore
+                end
+                NativeGMBridge.smallPearlDropCount = NativeGMBridge.smallPearlDropCount + 1
+                NativeGMBridge.smallPearlClientCredit = NativeGMBridge.smallPearlClientCredit
+                    + (tonumber(value) or 0)
+                appendEvent("small_pearl_credit", "drop="
+                    .. tostring(NativeGMBridge.smallPearlDropCount)
+                    .. ",value=" .. tostring(value)
+                    .. ",client_total=" .. tostring(NativeGMBridge.smallPearlClientCredit)
+                    .. ",account_base=" .. tostring(NativeGMBridge.smallPearlAccountBase))
+                writeStatus(nil, nil)
+            end
             if string.find(source, "獎項表演", 1, true) ~= nil then
                 NativeGMBridge.rewardCreditSerial = NativeGMBridge.rewardCreditSerial + 1
                 local serial = NativeGMBridge.rewardCreditSerial
@@ -367,6 +707,160 @@ local function getMachine()
     return dinoBall.gameMain.gameView.machine
 end
 
+local function markVisualPearl(machine, ball)
+    machine:nextBallTag()
+    local tag = machine.ballTag
+    ball:setTag(tag)
+    NativeGMBridge.visualPearlTags[tag] = true
+    return tag
+end
+
+-- Visual/physics simulation only. Tagged pearls are intercepted before the
+-- normal reward and network-settlement callbacks.
+local function spawnVisualPearls(ballType, count)
+    local machine = getMachine()
+    if machine == nil or dinoBall == nil or dinoBall.PhysicsBall == nil then
+        writeStatus("not_ready", "visual pearl simulator unavailable")
+        return
+    end
+    for i = 1, count do
+        local column = (i - 1) % 5
+        local row = math.floor((i - 1) / 5)
+        local pos = cc.vec3(-22 + column * 4.5, 42 + row * 0.25, -3.5 + row * 1.8)
+        local rot = cc.vec3((i * 37) % 360, (i * 71) % 360, 0)
+        local ball = dinoBall.PhysicsBall:create(ballType, machine.ballRoot, pos, rot)
+        if ballType == dinoBall.Define.BallType.BonusPearl then
+            ball:setIsBonus(true)
+        end
+        markVisualPearl(machine, ball)
+        machine.pearlCount = machine.pearlCount + 1
+    end
+    machine:onBallCountChanged()
+    appendEvent("visual_pearl_spawned", "ball_type=" .. tostring(ballType)
+        .. ",count=" .. tostring(count))
+    writeStatus("visual_only", "simulated pearls placed x" .. tostring(count))
+end
+
+local function shootVisualWhitePearl()
+    local machine = getMachine()
+    local define = dinoBall and dinoBall.Define or nil
+    if machine == nil or machine.shootPearl == nil or define == nil then
+        writeStatus("not_ready", "white pearl cannon unavailable")
+        return
+    end
+    local group = define.BlockGroup.DraBall + define.BlockGroup.Pearl + define.BlockGroup.Ticket
+    local tag = machine:shootPearl(group, dinoBall.ShootAngleG or 0, 1)
+    NativeGMBridge.visualPearlTags[tag] = true
+    appendEvent("visual_pearl_spawned", "ball_type=" .. tostring(define.BallType.Pearl)
+        .. ",count=1,launcher=cannon,ball_tag=" .. tostring(tag))
+    writeStatus("visual_only", "white pearl fired; settlement disabled")
+end
+
+local function shootVisualBluePearl()
+    local machine = getMachine()
+    local define = dinoBall and dinoBall.Define or nil
+    if machine == nil or machine.getBonusBallPos == nil or define == nil then
+        writeStatus("not_ready", "blue pearl launcher unavailable")
+        return
+    end
+    local launch = function()
+        local ball = dinoBall.PhysicsBall:create(define.BallType.BonusPearl,
+            machine.ballRoot, machine:getBonusBallPos(false), nil)
+        machine.pearlCount = machine.pearlCount + 1
+        machine:onBallCountChanged()
+        local tag = markVisualPearl(machine, ball)
+        ball:applyCentralImpulse(define.MachineDefine.BonusPearl.Force)
+        ball:setIsBonus(true)
+        appendEvent("visual_pearl_spawned", "ball_type=" .. tostring(define.BallType.BonusPearl)
+            .. ",count=1,launcher=dragon_head,ball_tag=" .. tostring(tag))
+    end
+    if machine.playDragonHeadShoot ~= nil then
+        machine:playDragonHeadShoot(define.BallType.BonusPearl, launch)
+    else
+        launch()
+    end
+    writeStatus("visual_only", "blue pearl fired; settlement disabled")
+end
+
+local function updateVisualWhiteAuto()
+    if not NativeGMBridge.visualWhiteAutoEnabled then
+        return
+    end
+    NativeGMBridge.visualWhiteAutoTicks = NativeGMBridge.visualWhiteAutoTicks + 1
+    if NativeGMBridge.visualWhiteAutoTicks < 4 then
+        return
+    end
+    NativeGMBridge.visualWhiteAutoTicks = 0
+    local machine = getMachine()
+    if machine == nil or machine.getPearlCount == nil then
+        return
+    end
+    if machine:getPearlCount() >= NativeGMBridge.visualWhiteAutoMaxPearls then
+        return
+    end
+    shootVisualWhitePearl()
+end
+
+-- Submit the same ordered state transition as a paid white shot entering a
+-- pearl-award middle hole. Blue pearls are created only after verifyOk=true.
+local function requestOfficialBluePearls()
+    if NativeGMBridge.pendingOfficialPearlSyncIndex ~= nil or NativeGMBridge.officialBlueLocked then
+        writeStatus("waiting", "official blue pearl batch still active")
+        return
+    end
+    local gameMain = dinoBall and dinoBall.gameMain or nil
+    local gameCtrl = gameMain and gameMain.gameView and gameMain.gameView.gameCtrl or nil
+    local machine = gameMain and gameMain.gameView and gameMain.gameView.machine or nil
+    local define = dinoBall and dinoBall.Define or nil
+    if gameMain == nil or gameCtrl == nil or machine == nil or define == nil
+        or gameCtrl.shootPearl == nil or gameMain.Net_SyncGameState == nil then
+        writeStatus("not_ready", "official blue pearl flow unavailable")
+        return
+    end
+
+    NativeGMBridge.visualWhiteAutoEnabled = false
+    NativeGMBridge.officialBlueLocked = true
+    NativeGMBridge.officialBlueOutstanding = 0
+    local shotOk = gameCtrl:shootPearl()
+    if not shotOk then
+        NativeGMBridge.officialBlueLocked = false
+        writeStatus("not_ready", "paid white shot was not accepted locally")
+        return
+    end
+    local ballTag = machine.ballTag
+    local holeIndex = nil
+    for index, triggerType in pairs(define.PartyTriggerDefine) do
+        if triggerType == define.PartyTriggerType.Pearl then
+            holeIndex = index
+            break
+        end
+    end
+    if holeIndex == nil then
+        NativeGMBridge.officialBlueLocked = false
+        writeStatus("error", "pearl-award hole unavailable")
+        return
+    end
+
+    -- Prevent the same physical shot from reporting a second middle-hole hit.
+    machine.nonEnterPearl[ballTag] = nil
+    local eventData = {
+        index = holeIndex,
+        partyTriggerType = define.PartyTriggerType.Pearl,
+        ballGroup = define.BlockGroup.Pearl,
+        currPartyType = gameCtrl.currPartyType,
+        value = 0,
+        ballTag = ballTag,
+        shootRot = dinoBall.ShootAngleG or 0
+    }
+    dinoBall.CustomEventMgr:NotifyEvent(define.Event.EnterPartyHole, eventData)
+    NativeGMBridge.pendingOfficialPearlSyncIndex = gameMain.syncGameIndex + 1
+    appendEvent("official_blue_pearl_req", "ball_tag=" .. tostring(ballTag)
+        .. ",hole_index=" .. tostring(holeIndex)
+        .. ",sync_index=" .. tostring(NativeGMBridge.pendingOfficialPearlSyncIndex))
+    gameMain:Net_SyncGameState(true)
+    writeStatus("server_pending", "official blue pearl probe sent")
+end
+
 local function addBall(ballType, label)
     local machine = getMachine()
     if machine == nil or machine.addBonusDraBall == nil or machine.createBonusDraBall == nil then
@@ -472,9 +966,25 @@ local function dispatch(command)
     elseif codeText ~= nil then
         sendServerCode(codeText)
     elseif command == "ADD_DRA" then
-        triggerNaturalDraBall()
+        writeStatus("blocked", "ADD_DRA disabled: server verify rejected")
     elseif command == "ADD_RAIN" then
         addBall(dinoBall.Define.BallType.Rainball, "rainbow ball added")
+    elseif command == "VISUAL_WHITE_10" then
+        spawnVisualPearls(dinoBall.Define.BallType.Pearl, 10)
+    elseif command == "VISUAL_BLUE_10" then
+        spawnVisualPearls(dinoBall.Define.BallType.BonusPearl, 10)
+    elseif command == "VISUAL_SHOOT_WHITE" then
+        shootVisualWhitePearl()
+    elseif command == "VISUAL_SHOOT_BLUE" then
+        shootVisualBluePearl()
+    elseif command == "TOGGLE_VISUAL_WHITE_AUTO" then
+        NativeGMBridge.visualWhiteAutoEnabled = not NativeGMBridge.visualWhiteAutoEnabled
+        NativeGMBridge.visualWhiteAutoTicks = 0
+        appendEvent("visual_white_auto", NativeGMBridge.visualWhiteAutoEnabled and "on" or "off")
+        writeStatus("visual_only", "white pearl auto fire="
+            .. (NativeGMBridge.visualWhiteAutoEnabled and "on" or "off"))
+    elseif command == "OFFICIAL_BLUE_PROBE" then
+        requestOfficialBluePearls()
     elseif command == "PATH_0" then
         NativeGMBridge.nextRewardType = 0
         writeStatus("armed", "next path=none")
@@ -497,8 +1007,10 @@ local function dispatch(command)
 end
 
 local function pollCommand()
+    installPassiveTimeline()
     installPathOverride()
     installDiagnostics()
+    updateVisualWhiteAuto()
     NativeGMBridge.statusPollCount = NativeGMBridge.statusPollCount + 1
     if NativeGMBridge.statusPollCount >= 10 then
         NativeGMBridge.statusPollCount = 0
@@ -511,6 +1023,27 @@ local function pollCommand()
     local content = file:read("*a") or ""
     file:close()
     local nonce, command = string.match(content, "^([^|\r\n]+)|([^\r\n]+)")
+    if nonce == nil or command == nil or nonce == NativeGMBridge.lastNonce then
+        return
+    end
+
+    -- Several StarMJ helper processes can load this bridge and poll the same
+    -- command file.  Atomically rename it before dispatch so exactly one
+    -- process owns the command instead of every process replaying it.
+    local claimPath = COMMAND_PATH .. "." .. nonce .. ".claim"
+    local claimed = os.rename(COMMAND_PATH, claimPath)
+    if not claimed then
+        return
+    end
+    local claimedFile = io.open(claimPath, "r")
+    if claimedFile == nil then
+        os.remove(claimPath)
+        return
+    end
+    local claimedContent = claimedFile:read("*a") or ""
+    claimedFile:close()
+    os.remove(claimPath)
+    nonce, command = string.match(claimedContent, "^([^|\r\n]+)|([^\r\n]+)")
     if nonce == nil or command == nil or nonce == NativeGMBridge.lastNonce then
         return
     end
@@ -527,7 +1060,22 @@ function NativeGMBridge:Start()
     end
     -- Never replay a command left behind by an earlier game session.
     os.remove(COMMAND_PATH)
+    self.visualPearlTags = {}
+    self.visualWhiteAutoEnabled = false
+    self.visualWhiteAutoTicks = 0
+    self.pendingOfficialPearlSyncIndex = nil
+    self.officialBlueLocked = false
+    self.officialBlueOutstanding = 0
+    self.officialBlueFinalSyncIndex = nil
+    self.smallPearlDropCount = 0
+    self.smallPearlClientCredit = 0
+    self.smallPearlAccountBase = readAccountBalance()
+    self.lastGameStateVerify = "none"
+    self.lastGameStateAckIndex = "unknown"
+    self.gameStateRejectCount = 0
     dinoBall.NativeGMBridge = self
+    startTimeline()
+    installPassiveTimeline()
     installPathOverride()
     installDiagnostics()
     self.scheduleId = cc.Director:getInstance():getScheduler():scheduleScriptFunc(pollCommand, 0.10, false)
@@ -537,6 +1085,13 @@ end
 function NativeGMBridge:Stop()
     self.nextRewardType = nil
     self.persistentRewardType = nil
+    self.visualPearlTags = {}
+    self.visualWhiteAutoEnabled = false
+    self.visualWhiteAutoTicks = 0
+    self.pendingOfficialPearlSyncIndex = nil
+    self.officialBlueLocked = false
+    self.officialBlueOutstanding = 0
+    self.officialBlueFinalSyncIndex = nil
     if self.scheduleId ~= nil then
         cc.Director:getInstance():getScheduler():unscheduleScriptEntry(self.scheduleId)
         self.scheduleId = nil
@@ -549,10 +1104,22 @@ function NativeGMBridge:Stop()
         dinoBall.Machine.addBonusDraBall = self.originalAddBonusDraBall
         self.originalAddBonusDraBall = nil
     end
+    if self.originalModelSendLuaCommand ~= nil and PearlBubbleModel ~= nil then
+        PearlBubbleModel.SendLuaCommand = self.originalModelSendLuaCommand
+        self.originalModelSendLuaCommand = nil
+    end
+    if self.originalModelOnCommand ~= nil and PearlBubbleModel ~= nil then
+        PearlBubbleModel.OnCommand = self.originalModelOnCommand
+        self.originalModelOnCommand = nil
+    end
     local gameMain = dinoBall and dinoBall.gameMain or nil
     if self.originalOnSyncConeyAck ~= nil and gameMain ~= nil then
         gameMain.OnSyncConeyAck = self.originalOnSyncConeyAck
         self.originalOnSyncConeyAck = nil
+    end
+    if self.originalOnSyncGameStateAckV2 ~= nil and gameMain ~= nil then
+        gameMain.OnSyncGameStateAckV2 = self.originalOnSyncGameStateAckV2
+        self.originalOnSyncGameStateAckV2 = nil
     end
     if self.originalOnUserConeyChanged ~= nil and gameMain ~= nil then
         gameMain.OnUserConeyChanged = self.originalOnUserConeyChanged
@@ -582,6 +1149,14 @@ function NativeGMBridge:Stop()
     if self.originalGameCtrlAddProperty ~= nil and gameCtrl ~= nil then
         gameCtrl.addProperty = self.originalGameCtrlAddProperty
         self.originalGameCtrlAddProperty = nil
+    end
+    if self.originalOnDwonTrigger ~= nil and gameCtrl ~= nil then
+        gameCtrl.onDwonTrigger = self.originalOnDwonTrigger
+        self.originalOnDwonTrigger = nil
+    end
+    if self.originalOnPartyTrigger ~= nil and gameCtrl ~= nil then
+        gameCtrl.onPartyTrigger = self.originalOnPartyTrigger
+        self.originalOnPartyTrigger = nil
     end
     writeStatus("stopped", "bridge stopped")
 end

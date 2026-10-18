@@ -1,4 +1,21 @@
-# PearlBubble Native GM
+# PearlBubble Native GM v2.3 BAT + Resource Pack
+
+本壓縮包是可攜式 BAT 安裝版，已內含 `resource-pack/PearlBubbleLua_ResourcePack_v2.1.zip`。
+若目標電腦缺少 `tmpNew\Lua\PearlBubbleLua\main.lua`，`INSTALL.bat` 會先自動補齊深海龍珠 Lua 資源，再安裝 Native GM。
+
+本版可直接接受指定版本的原始 `StarMJ371.exe`。安裝器會先備份原檔，再於本機解殼並套用最小相容補丁；不需自行準備脫殼檔。安裝後仍直接執行原檔名 `StarMJ371.exe`，`RESTORE.bat` 可還原安裝前的原始執行檔。
+
+## 快速安裝
+
+1. 將整個 ZIP 解壓到遊戲的 `StarAIO` 資料夾，請勿只單獨取出 BAT。
+2. 關閉 `StarMJ371` 與 `PearlBubbleNativeGM`。
+3. 確認資料夾內有原始 `StarMJ371.exe`，再雙擊 `INSTALL.bat`；安裝器會自動以 BAT 所在的目前資料夾為遊戲目標。
+4. 安裝完成後進入深海龍珠，再雙擊 `START_GM.bat`。
+5. 可用 `CHECK_STATUS.bat` 驗證安裝，或用 `RESTORE.bat` 還原。
+
+若遊戲位於 `C:\Program Files` 或 `C:\Program Files (x86)`，`INSTALL.bat`、`START_GM.bat` 與 `RESTORE.bat` 會自動要求系統管理員權限；出現 Windows UAC 視窗時請按「是」。
+
+---
 
 深海龍珠客戶端研究與 Native 控制面板（v2.1）。此儲存庫預設為私人使用。
 

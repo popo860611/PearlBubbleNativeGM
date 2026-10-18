@@ -37,6 +37,8 @@ internal sealed class MainForm : Form
     private readonly Label rewardState = new();
     private readonly Label pathResultState = new();
     private readonly Label serverCodeState = new();
+    private readonly Label smallPearlState = new();
+    private readonly Label dragonSyncState = new();
     private readonly TextBox serverCodeInput = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 350 };
     private long serial;
@@ -54,7 +56,7 @@ internal sealed class MainForm : Form
         statusPath = Path.Combine(root, "tmpNew", "PearlBubbleNativeGM.status");
 
         Text = "深海龍珠 Native GM";
-        ClientSize = new Size(390, 754);
+        ClientSize = new Size(390, 930);
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
         MaximizeBox = false;
         MinimizeBox = true;
@@ -85,6 +87,8 @@ internal sealed class MainForm : Form
         ConfigureStatus(rewardState, 223);
         ConfigureStatus(pathResultState, 247);
         ConfigureStatus(serverCodeState, 271);
+        ConfigureStatus(smallPearlState, 295);
+        ConfigureStatus(dragonSyncState, 319);
         Controls.Add(gameState);
         Controls.Add(bridgeState);
         Controls.Add(pendingState);
@@ -95,18 +99,27 @@ internal sealed class MainForm : Form
         Controls.Add(rewardState);
         Controls.Add(pathResultState);
         Controls.Add(serverCodeState);
+        Controls.Add(smallPearlState);
+        Controls.Add(dragonSyncState);
 
-        Controls.Add(Section("本機實體球（不保證伺服器入帳）", 304));
-        Controls.Add(ActionButton("自然流程普通龍珠", "ADD_DRA", 18, 336, Color.FromArgb(30, 136, 229)));
-        Controls.Add(ActionButton("本機增加彩虹珠", "ADD_RAIN", 202, 336, Color.FromArgb(171, 71, 188)));
+        Controls.Add(Section("本機實體球（不保證伺服器入帳）", 352));
+        Controls.Add(ActionButton("本機增加彩虹珠", "ADD_RAIN", 202, 384, Color.FromArgb(171, 71, 188)));
+        Controls.Add(ActionButton("白珠佈場 +10", "VISUAL_WHITE_10", 18, 430, Color.FromArgb(120, 144, 156)));
+        Controls.Add(ActionButton("藍珠佈場 +10", "VISUAL_BLUE_10", 202, 430, Color.FromArgb(3, 169, 244)));
+        Controls.Add(ActionButton("白珠連射 開／關", "TOGGLE_VISUAL_WHITE_AUTO", 18, 476, Color.FromArgb(96, 125, 139)));
+        Controls.Add(ActionButton("龍頭彈射藍珠", "VISUAL_SHOOT_BLUE", 202, 476, Color.FromArgb(2, 136, 209)));
+        var officialBlue = ActionButton("正式藍珠測試（扣1發）", "OFFICIAL_BLUE_PROBE", 18, 522, Color.FromArgb(0, 105, 92));
+        officialBlue.Width = 356;
+        officialBlue.Click += (_, _) => BeginOfficialBlueCooldown(officialBlue);
+        Controls.Add(officialBlue);
 
-        Controls.Add(Section("伺服器作弊碼測試", 394));
-        serverCodeInput.Location = new Point(18, 427);
+        Controls.Add(Section("伺服器作弊碼測試", 574));
+        serverCodeInput.Location = new Point(18, 607);
         serverCodeInput.Size = new Size(172, 34);
         serverCodeInput.MaxLength = 8;
         serverCodeInput.PlaceholderText = "輸入數字代碼";
         Controls.Add(serverCodeInput);
-        var sendServerCode = ActionButton("送出至伺服器", "", 202, 422, Color.FromArgb(0, 121, 107));
+        var sendServerCode = ActionButton("送出至伺服器", "", 202, 602, Color.FromArgb(0, 121, 107));
         sendServerCode.Click += (_, _) =>
         {
             var code = serverCodeInput.Text.Trim();
@@ -121,25 +134,25 @@ internal sealed class MainForm : Form
         Controls.Add(new Label
         {
             Text = "只接受 1～8 位數字；是否有效由私服回覆判定",
-            Location = new Point(18, 466),
+            Location = new Point(18, 646),
             Size = new Size(356, 22),
             ForeColor = Color.Silver
         });
 
-        Controls.Add(Section("指定下一顆龍珠落洞路徑（一次性）", 499));
-        Controls.Add(ActionButton("空獎路徑", "PATH_0", 18, 531, Color.FromArgb(84, 110, 122)));
-        Controls.Add(ActionButton("小獎路徑（維持）", "PATH_1_HOLD", 202, 531, Color.FromArgb(67, 160, 71)));
-        Controls.Add(ActionButton("中獎路徑（維持）", "PATH_2_HOLD", 18, 585, Color.FromArgb(251, 140, 0)));
-        Controls.Add(ActionButton("大獎路徑（維持）", "PATH_3_HOLD", 202, 585, Color.FromArgb(229, 57, 53)));
+        Controls.Add(Section("指定下一顆龍珠落洞路徑（一次性）", 679));
+        Controls.Add(ActionButton("空獎路徑", "PATH_0", 18, 711, Color.FromArgb(84, 110, 122)));
+        Controls.Add(ActionButton("小獎路徑（維持）", "PATH_1_HOLD", 202, 711, Color.FromArgb(67, 160, 71)));
+        Controls.Add(ActionButton("中獎路徑（維持）", "PATH_2_HOLD", 18, 765, Color.FromArgb(251, 140, 0)));
+        Controls.Add(ActionButton("大獎路徑（維持）", "PATH_3_HOLD", 202, 765, Color.FromArgb(229, 57, 53)));
 
-        var cancel = ActionButton("取消指定／恢復正常", "CANCEL_PATH", 18, 642, Color.FromArgb(69, 75, 86));
+        var cancel = ActionButton("取消指定／恢復正常", "CANCEL_PATH", 18, 822, Color.FromArgb(69, 75, 86));
         cancel.Width = 356;
         Controls.Add(cancel);
 
         var hint = new Label
         {
             Text = "Insert：顯示／隱藏　　路徑只影響客戶端演出",
-            Location = new Point(18, 704),
+            Location = new Point(18, 884),
             Size = new Size(356, 24),
             ForeColor = Color.Silver,
             TextAlign = ContentAlignment.MiddleCenter
@@ -216,6 +229,14 @@ internal sealed class MainForm : Form
         }
     }
 
+    private async void BeginOfficialBlueCooldown(Button button)
+    {
+        button.Enabled = false;
+        await Task.Delay(10000);
+        if (!IsDisposed)
+            button.Enabled = true;
+    }
+
     private void RefreshStatus()
     {
         var names = new[] { "StarMJ371_unpacked_RemoveCheck_Cli_v2", "StarMJ371", "StarMJ371_unpacked_RemoveCheck_Cli" };
@@ -234,6 +255,8 @@ internal sealed class MainForm : Form
             rewardState.Text = "伺服器龍珠結果：尚未收到";
             pathResultState.Text = "路徑結果：伺服器等待資料／客戶端演出等待資料";
             serverCodeState.Text = "伺服器碼：尚未送出";
+            smallPearlState.Text = "小珠流程：等待資料";
+            dragonSyncState.Text = "龍珠同步：等待資料";
             return;
         }
         try
@@ -260,6 +283,12 @@ internal sealed class MainForm : Form
             values.TryGetValue("server_code", out var serverCode);
             values.TryGetValue("server_code_account_delta", out var serverCodeAccountDelta);
             values.TryGetValue("server_code_reward_delta", out var serverCodeRewardDelta);
+            values.TryGetValue("small_pearl_drop_count", out var smallPearlDropCount);
+            values.TryGetValue("small_pearl_client_credit", out var smallPearlClientCredit);
+            values.TryGetValue("small_pearl_account_delta", out var smallPearlAccountDelta);
+            values.TryGetValue("dragon_sync_verify", out var dragonSyncVerify);
+            values.TryGetValue("dragon_sync_index", out var dragonSyncIndex);
+            values.TryGetValue("dragon_sync_reject_count", out var dragonSyncRejectCount);
             bridgeState.Text = $"橋接：{state ?? "unknown"}　{detail ?? ""}";
             var persistentPathName = persistentPath switch
             {
@@ -285,6 +314,8 @@ internal sealed class MainForm : Form
             rewardState.Text = $"伺服器龍珠結果：{rewardCount ?? "0"}　正式獎值 {RewardListNames(rewardTypes)}";
             pathResultState.Text = $"路徑結果：伺服器正式獎值 {RewardName(serverPathReward)}／客戶端演出路徑 {RewardName(visualPathReward)}";
             serverCodeState.Text = $"伺服器碼：{serverCode ?? "none"}　餘額差 {serverCodeAccountDelta ?? "?"}　回覆 {serverCodeRewardDelta ?? "?"}";
+            smallPearlState.Text = $"小珠流程：掉落 {smallPearlDropCount ?? "0"}／客戶端 +{smallPearlClientCredit ?? "0"}／帳戶 +{smallPearlAccountDelta ?? "?"}";
+            dragonSyncState.Text = $"龍珠同步：{dragonSyncVerify ?? "none"}／序號 {dragonSyncIndex ?? "?"}／拒絕 {dragonSyncRejectCount ?? "0"}";
         }
         catch (Exception ex)
         {
