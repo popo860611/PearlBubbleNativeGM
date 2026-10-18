@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $false)]
     [string]$GameRoot = (Split-Path -Parent $PSScriptRoot)
 )

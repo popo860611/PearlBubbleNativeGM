@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,21 @@ DEPLOY = ROOT / "src" / "deploy.py"
 
 
 class NativeMenuContractTests(unittest.TestCase):
+    def test_windows_powershell_installers_keep_bom_and_current_payload_hashes(self):
+        package_root = Path(__file__).resolve().parents[1]
+        install = package_root / "installer" / "install.ps1"
+        status = package_root / "installer" / "status.ps1"
+        bridge_payload = package_root / "installer" / "payload" / "NativeGMBridge.lua"
+        exe_payload = package_root / "installer" / "payload" / "PearlBubbleNativeGM.exe"
+        self.assertTrue(install.read_bytes().startswith(b"\xef\xbb\xbf"))
+        self.assertTrue(status.read_bytes().startswith(b"\xef\xbb\xbf"))
+        bridge_hash = hashlib.sha256(bridge_payload.read_bytes()).hexdigest().upper()
+        exe_hash = hashlib.sha256(exe_payload.read_bytes()).hexdigest().upper()
+        self.assertIn(bridge_hash, install.read_text(encoding="utf-8-sig"))
+        self.assertIn(exe_hash, install.read_text(encoding="utf-8-sig"))
+        self.assertIn(bridge_hash, status.read_text(encoding="utf-8-sig"))
+        self.assertIn(exe_hash, status.read_text(encoding="utf-8-sig"))
+
     def test_bridge_has_exact_supported_commands_and_one_shot_visual_override(self):
         text = BRIDGE.read_text(encoding="utf-8")
         for command in (
