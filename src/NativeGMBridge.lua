@@ -54,6 +54,7 @@ NativeGMBridge.timelineStartClock = 0
 NativeGMBridge.smallPearlDropCount = 0
 NativeGMBridge.smallPearlClientCredit = 0
 NativeGMBridge.smallPearlAccountBase = "unknown"
+NativeGMBridge.smallPearlLastValue = 0
 NativeGMBridge.lastGameStateVerify = "none"
 NativeGMBridge.lastGameStateAckIndex = "unknown"
 NativeGMBridge.gameStateRejectCount = 0
@@ -342,8 +343,14 @@ local function writeStatus(state, detail)
     local pearlAccountBase = tonumber(NativeGMBridge.smallPearlAccountBase)
     local pearlAccountNow = tonumber(accountBalance)
     local smallPearlAccountDelta = "unknown"
+    local smallPearlSync = "unknown"
     if pearlAccountBase ~= nil and pearlAccountNow ~= nil then
         smallPearlAccountDelta = pearlAccountNow - pearlAccountBase
+        if smallPearlAccountDelta == NativeGMBridge.smallPearlClientCredit then
+            smallPearlSync = "true"
+        else
+            smallPearlSync = "pending"
+        end
     end
     local gameMain = dinoBall and dinoBall.gameMain or nil
     local syncIndex = gameMain and gameMain.syncGameIndex or "unknown"
@@ -373,8 +380,10 @@ local function writeStatus(state, detail)
     file:write("server_code_account_delta=" .. tostring(serverCodeAccountDelta) .. "\n")
     file:write("server_code_reward_delta=" .. tostring(serverCodeRewardDelta) .. "\n")
     file:write("small_pearl_drop_count=" .. tostring(NativeGMBridge.smallPearlDropCount) .. "\n")
+    file:write("small_pearl_last_value=" .. tostring(NativeGMBridge.smallPearlLastValue) .. "\n")
     file:write("small_pearl_client_credit=" .. tostring(NativeGMBridge.smallPearlClientCredit) .. "\n")
     file:write("small_pearl_account_delta=" .. tostring(smallPearlAccountDelta) .. "\n")
+    file:write("small_pearl_sync=" .. tostring(smallPearlSync) .. "\n")
     file:write("dragon_sync_verify=" .. tostring(NativeGMBridge.lastGameStateVerify) .. "\n")
     file:write("dragon_sync_index=" .. tostring(NativeGMBridge.lastGameStateAckIndex) .. "\n")
     file:write("dragon_sync_reject_count=" .. tostring(NativeGMBridge.gameStateRejectCount) .. "\n")
@@ -590,6 +599,7 @@ local function installDiagnostics()
                     NativeGMBridge.smallPearlAccountBase = accountBefore
                 end
                 NativeGMBridge.smallPearlDropCount = NativeGMBridge.smallPearlDropCount + 1
+                NativeGMBridge.smallPearlLastValue = tonumber(value) or 0
                 NativeGMBridge.smallPearlClientCredit = NativeGMBridge.smallPearlClientCredit
                     + (tonumber(value) or 0)
                 appendEvent("small_pearl_credit", "drop="
@@ -1068,6 +1078,7 @@ function NativeGMBridge:Start()
     self.officialBlueOutstanding = 0
     self.officialBlueFinalSyncIndex = nil
     self.smallPearlDropCount = 0
+    self.smallPearlLastValue = 0
     self.smallPearlClientCredit = 0
     self.smallPearlAccountBase = readAccountBalance()
     self.lastGameStateVerify = "none"

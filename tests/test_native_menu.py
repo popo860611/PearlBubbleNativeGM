@@ -5,13 +5,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "src" / "NativeGMBridge.lua"
 PROGRAM = ROOT / "src" / "Program.cs"
+DEPLOY = ROOT / "src" / "deploy.py"
 
 
 class NativeMenuContractTests(unittest.TestCase):
     def test_bridge_has_exact_supported_commands_and_one_shot_visual_override(self):
         text = BRIDGE.read_text(encoding="utf-8")
         for command in (
-            "ADD_DRA",
             "ADD_RAIN",
             "PATH_0",
             "PATH_1",
@@ -37,10 +37,9 @@ class NativeMenuContractTests(unittest.TestCase):
         self.assertIn("SendLuaCommand", text)
         self.assertIn("tonumber(codeText)", text)
 
-    def test_controller_exposes_six_requested_actions_and_hotkey(self):
+    def test_controller_exposes_safe_requested_actions_and_hotkey(self):
         text = PROGRAM.read_text(encoding="utf-8")
         for label in (
-            "自然流程普通龍珠",
             "增加彩虹珠",
             "空獎路徑",
             "小獎路徑",
@@ -50,6 +49,7 @@ class NativeMenuContractTests(unittest.TestCase):
             self.assertIn(label, text)
         self.assertIn("Keys.Insert", text)
         self.assertIn("TopMost = true", text)
+        self.assertNotIn('ActionButton("自然流程普通龍珠", "ADD_DRA"', text)
 
     def test_bridge_observes_server_settlement_and_correlates_explicit_test_code(self):
         text = BRIDGE.read_text(encoding="utf-8")
@@ -99,10 +99,20 @@ class NativeMenuContractTests(unittest.TestCase):
         discard = text.index("os.remove(COMMAND_PATH)", start)
         self.assertLess(discard, scheduler)
 
+    def test_bridge_atomically_claims_each_command_before_dispatch(self):
+        text = BRIDGE.read_text(encoding="utf-8")
+        poll = text[text.index("local function pollCommand()"):
+                    text.index("function NativeGMBridge:Start()")]
+        self.assertIn('local claimPath = COMMAND_PATH .. "." .. nonce .. ".claim"', poll)
+        self.assertIn("local claimed = os.rename(COMMAND_PATH, claimPath)", poll)
+        self.assertIn('local claimedFile = io.open(claimPath, "r")', poll)
+        self.assertIn("os.remove(claimPath)", poll)
+        self.assertLess(poll.index("os.rename(COMMAND_PATH, claimPath)"),
+                        poll.index("pcall(dispatch, command)"))
+
     def test_controller_has_server_code_tester_and_marks_local_ball_buttons(self):
         text = PROGRAM.read_text(encoding="utf-8")
         for label in (
-            "自然流程普通龍珠",
             "本機增加彩虹珠",
             "伺服器作弊碼測試",
             "送出至伺服器",
@@ -186,16 +196,77 @@ class NativeMenuContractTests(unittest.TestCase):
         self.assertIn("scheduleBalanceProbe", text)
         self.assertIn("gameCtrl.addProperty = self.originalGameCtrlAddProperty", text)
 
-    def test_normal_ball_button_uses_the_games_natural_party_hole_flow(self):
-        text = BRIDGE.read_text(encoding="utf-8")
-        self.assertIn("local function triggerNaturalDraBall()", text)
-        self.assertIn("gameCtrl:onPartyTrigger", text)
-        self.assertIn("define.PartyTriggerType.DraBall", text)
-        self.assertIn("define.BlockGroup.EnterDraBall", text)
-        self.assertIn('appendEvent("natural_draball_trigger"', text)
-        dispatch = text[text.index("local function dispatch(command)"):]
+    def test_rejected_client_forged_dragon_ball_command_is_disabled(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        dispatch = bridge[bridge.index("local function dispatch(command)"):]
+        self.assertNotIn('ActionButton("自然流程普通龍珠", "ADD_DRA"', controller)
         self.assertIn('command == "ADD_DRA"', dispatch)
-        self.assertIn("triggerNaturalDraBall()", dispatch)
+        self.assertIn('writeStatus("blocked", "ADD_DRA disabled: server verify rejected")', dispatch)
+        self.assertNotIn("triggerNaturalDraBall()", dispatch)
+
+    def test_two_small_pearl_types_have_visual_only_spawn_and_launch_controls(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        self.assertIn("visualPearlTags", bridge)
+        self.assertIn("local function spawnVisualPearls(ballType, count)", bridge)
+        self.assertIn("local function shootVisualWhitePearl()", bridge)
+        self.assertIn("local function shootVisualBluePearl()", bridge)
+        self.assertIn('appendEvent("visual_pearl_spawned"', bridge)
+        self.assertIn('appendEvent("visual_pearl_drop_ignored"', bridge)
+        self.assertIn('appendEvent("visual_party_hole_ignored"', bridge)
+        dispatch = bridge[bridge.index("local function dispatch(command)"):]
+        for command in ("VISUAL_WHITE_10", "VISUAL_BLUE_10", "VISUAL_SHOOT_WHITE", "VISUAL_SHOOT_BLUE"):
+            self.assertIn(command, dispatch)
+        self.assertIn('"白珠佈場 +10", "VISUAL_WHITE_10"', controller)
+        self.assertIn('"藍珠佈場 +10", "VISUAL_BLUE_10"', controller)
+        self.assertIn('"白珠連射 開／關", "TOGGLE_VISUAL_WHITE_AUTO"', controller)
+        self.assertIn('"龍頭彈射藍珠", "VISUAL_SHOOT_BLUE"', controller)
+
+    def test_visual_white_auto_fire_is_rate_limited_and_capped(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        self.assertIn("visualWhiteAutoEnabled", bridge)
+        self.assertIn("visualWhiteAutoTicks", bridge)
+        self.assertIn("visualWhiteAutoMaxPearls = 60", bridge)
+        self.assertIn('command == "TOGGLE_VISUAL_WHITE_AUTO"', bridge)
+        self.assertIn("updateVisualWhiteAuto()", bridge)
+        self.assertIn('appendEvent("visual_white_auto"', bridge)
+        self.assertIn("machine:getPearlCount() >= NativeGMBridge.visualWhiteAutoMaxPearls", bridge)
+
+    def test_official_blue_pearl_probe_waits_for_server_verify_ack(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        self.assertIn("local function requestOfficialBluePearls()", bridge)
+        self.assertIn("gameCtrl:shootPearl()", bridge)
+        self.assertIn("define.Event.EnterPartyHole", bridge)
+        self.assertIn("gameMain:Net_SyncGameState(true)", bridge)
+        self.assertIn("pendingOfficialPearlSyncIndex", bridge)
+        self.assertIn("originalOnSyncGameStateAckV2", bridge)
+        self.assertIn("data.verifyOk", bridge)
+        self.assertIn("gameCtrl:onPearlPartyTrigger()", bridge)
+        self.assertIn('appendEvent("official_blue_pearl_ack"', bridge)
+        self.assertIn('command == "OFFICIAL_BLUE_PROBE"', bridge)
+        self.assertIn('"正式藍珠測試（扣1發）", "OFFICIAL_BLUE_PROBE"', controller)
+
+    def test_official_blue_probe_stays_locked_until_all_blue_drops_are_verified(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        self.assertIn("officialBlueLocked", bridge)
+        self.assertIn("officialBlueOutstanding", bridge)
+        self.assertIn("officialBlueFinalSyncIndex", bridge)
+        self.assertIn("official blue pearl batch still active", bridge)
+        self.assertIn('appendEvent("official_blue_drop"', bridge)
+        self.assertIn('appendEvent("official_blue_settled"', bridge)
+        self.assertIn("BeginOfficialBlueCooldown", controller)
+        self.assertIn("await Task.Delay(10000)", controller)
+
+    def test_unsafe_server_settled_small_pearl_buttons_are_not_exposed(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        self.assertNotIn('"ADD_SMALL_1"', controller)
+        self.assertNotIn('"ADD_SMALL_5"', controller)
+        self.assertNotIn('command == "ADD_SMALL_1"', bridge)
+        self.assertNotIn('command == "ADD_SMALL_5"', bridge)
 
     def test_bridge_logs_authoritative_money_callbacks_as_events(self):
         text = BRIDGE.read_text(encoding="utf-8")
@@ -207,6 +278,95 @@ class NativeMenuContractTests(unittest.TestCase):
         self.assertIn("gameMain.OnChangeMoneyNotify = self.originalOnChangeMoneyNotify", text)
         self.assertIn("gameMain.OnEventChangeNotify = self.originalOnEventChangeNotify", text)
 
+    def test_small_pearl_credit_and_dragon_sync_have_separate_diagnostics(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        for field in (
+            "smallPearlDropCount",
+            "smallPearlClientCredit",
+            "smallPearlAccountBase",
+            "lastGameStateVerify",
+            "lastGameStateAckIndex",
+            "gameStateRejectCount",
+        ):
+            self.assertIn(field, bridge)
+        for event_name in (
+            'appendEvent("small_pearl_credit"',
+            'appendEvent("dragon_sync_ack"',
+        ):
+            self.assertIn(event_name, bridge)
+        for status_key in (
+            'file:write("small_pearl_drop_count="',
+            'file:write("small_pearl_client_credit="',
+            'file:write("small_pearl_account_delta="',
+            'file:write("dragon_sync_verify="',
+            'file:write("dragon_sync_index="',
+            'file:write("dragon_sync_reject_count="',
+        ):
+            self.assertIn(status_key, bridge)
+        self.assertIn("真珠結算：", controller)
+        self.assertIn("龍珠同步：", controller)
+        self.assertIn('TryGetValue("small_pearl_drop_count"', controller)
+        self.assertIn('TryGetValue("dragon_sync_verify"', controller)
+
+    def test_real_pearl_settlement_reports_last_value_and_server_sync(self):
+        bridge = BRIDGE.read_text(encoding="utf-8")
+        controller = PROGRAM.read_text(encoding="utf-8")
+        self.assertIn("smallPearlLastValue", bridge)
+        self.assertIn('file:write("small_pearl_last_value="', bridge)
+        self.assertIn('file:write("small_pearl_sync="', bridge)
+        self.assertIn("NativeGMBridge.smallPearlLastValue = tonumber(value) or 0", bridge)
+        self.assertIn('TryGetValue("small_pearl_last_value"', controller)
+        self.assertIn('TryGetValue("small_pearl_sync"', controller)
+        self.assertIn("真珠結算：", controller)
+        self.assertIn("等待同步", controller)
+        self.assertIn("一致", controller)
+
+    def test_passive_timeline_hooks_the_real_model_send_and_receive_boundaries(self):
+        text = BRIDGE.read_text(encoding="utf-8")
+        self.assertIn('local TIMELINE_LOG_PATH = "./tmpNew/PearlBubbleNativeGM.timeline.log"', text)
+        self.assertIn("originalModelSendLuaCommand", text)
+        self.assertIn("originalModelOnCommand", text)
+        self.assertIn("PearlBubbleModel.SendLuaCommand = function(self, cmd, content)", text)
+        self.assertIn("PearlBubbleModel.OnCommand = function(self, luaCommand)", text)
+        self.assertIn('appendTimeline("SEND", cmd, content)', text)
+        self.assertIn('appendTimeline("RECV", commandType, content)', text)
+        self.assertIn("PearlBubbleModel.SendLuaCommand = self.originalModelSendLuaCommand", text)
+        self.assertIn("PearlBubbleModel.OnCommand = self.originalModelOnCommand", text)
+
+    def test_passive_timeline_serializes_the_parsed_protocol_structures(self):
+        text = BRIDGE.read_text(encoding="utf-8")
+        for field in (
+            '"code"',
+            '"verifyOk"',
+            '"index"',
+            '"bgDataList"',
+            '"ballType"',
+            '"holeType"',
+            '"broadcastIndex"',
+            '"buffer"',
+            '"soulBuffer"',
+            '"changeAmount"',
+            '"currentMoney"',
+        ):
+            self.assertIn(field, text)
+        self.assertIn("timelineProtocolFields", text)
+        self.assertIn("timelineVectorFields", text)
+        self.assertNotIn("ParseBgDataList", text)
+        self.assertNotIn("table.tostring", text)
+        self.assertNotIn("HexDump", text)
+
+    def test_passive_timeline_has_stable_sequence_and_relative_clock_columns(self):
+        text = BRIDGE.read_text(encoding="utf-8")
+        self.assertIn("timelineSequence", text)
+        self.assertIn("timelineStartClock", text)
+        self.assertIn('"seq|unix_s|elapsed_ms|direction|opcode|name|data\\n"', text)
+        self.assertIn("math.floor((os.clock() - NativeGMBridge.timelineStartClock) * 1000 + 0.5)", text)
+        self.assertIn("timelineOpcodeName", text)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

@@ -255,7 +255,7 @@ internal sealed class MainForm : Form
             rewardState.Text = "伺服器龍珠結果：尚未收到";
             pathResultState.Text = "路徑結果：伺服器等待資料／客戶端演出等待資料";
             serverCodeState.Text = "伺服器碼：尚未送出";
-            smallPearlState.Text = "小珠流程：等待資料";
+            smallPearlState.Text = "真珠結算：等待資料";
             dragonSyncState.Text = "龍珠同步：等待資料";
             return;
         }
@@ -284,8 +284,10 @@ internal sealed class MainForm : Form
             values.TryGetValue("server_code_account_delta", out var serverCodeAccountDelta);
             values.TryGetValue("server_code_reward_delta", out var serverCodeRewardDelta);
             values.TryGetValue("small_pearl_drop_count", out var smallPearlDropCount);
+            values.TryGetValue("small_pearl_last_value", out var smallPearlLastValue);
             values.TryGetValue("small_pearl_client_credit", out var smallPearlClientCredit);
             values.TryGetValue("small_pearl_account_delta", out var smallPearlAccountDelta);
+            values.TryGetValue("small_pearl_sync", out var smallPearlSync);
             values.TryGetValue("dragon_sync_verify", out var dragonSyncVerify);
             values.TryGetValue("dragon_sync_index", out var dragonSyncIndex);
             values.TryGetValue("dragon_sync_reject_count", out var dragonSyncRejectCount);
@@ -314,7 +316,8 @@ internal sealed class MainForm : Form
             rewardState.Text = $"伺服器龍珠結果：{rewardCount ?? "0"}　正式獎值 {RewardListNames(rewardTypes)}";
             pathResultState.Text = $"路徑結果：伺服器正式獎值 {RewardName(serverPathReward)}／客戶端演出路徑 {RewardName(visualPathReward)}";
             serverCodeState.Text = $"伺服器碼：{serverCode ?? "none"}　餘額差 {serverCodeAccountDelta ?? "?"}　回覆 {serverCodeRewardDelta ?? "?"}";
-            smallPearlState.Text = $"小珠流程：掉落 {smallPearlDropCount ?? "0"}／客戶端 +{smallPearlClientCredit ?? "0"}／帳戶 +{smallPearlAccountDelta ?? "?"}";
+            var smallPearlSyncText = smallPearlSync == "true" ? "一致" : smallPearlSync == "pending" ? "等待同步" : "未知";
+            smallPearlState.Text = $"真珠結算：本顆 +{smallPearlLastValue ?? "0"}／累計 +{smallPearlClientCredit ?? "0"}／帳戶 +{smallPearlAccountDelta ?? "?"}／{smallPearlSyncText}";
             dragonSyncState.Text = $"龍珠同步：{dragonSyncVerify ?? "none"}／序號 {dragonSyncIndex ?? "?"}／拒絕 {dragonSyncRejectCount ?? "0"}";
         }
         catch (Exception ex)
