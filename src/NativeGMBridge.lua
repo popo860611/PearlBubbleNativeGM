@@ -343,14 +343,14 @@ local function writeStatus(state, detail)
     local pearlAccountBase = tonumber(NativeGMBridge.smallPearlAccountBase)
     local pearlAccountNow = tonumber(accountBalance)
     local smallPearlAccountDelta = "unknown"
-    local smallPearlSync = "unknown"
+    local smallPearlSync = "idle"
     if pearlAccountBase ~= nil and pearlAccountNow ~= nil then
         smallPearlAccountDelta = pearlAccountNow - pearlAccountBase
-        if smallPearlAccountDelta == NativeGMBridge.smallPearlClientCredit then
-            smallPearlSync = "true"
-        else
-            smallPearlSync = "pending"
-        end
+    end
+    -- readAccountBalance() and addProperty() observe the same client-side model.
+    -- Equality here is therefore not proof that the remote account was credited.
+    if NativeGMBridge.smallPearlClientCredit > 0 then
+        smallPearlSync = "local_only"
     end
     local gameMain = dinoBall and dinoBall.gameMain or nil
     local syncIndex = gameMain and gameMain.syncGameIndex or "unknown"

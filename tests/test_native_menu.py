@@ -335,8 +335,9 @@ class NativeMenuContractTests(unittest.TestCase):
         self.assertIn('TryGetValue("small_pearl_last_value"', controller)
         self.assertIn('TryGetValue("small_pearl_sync"', controller)
         self.assertIn("真珠結算：", controller)
-        self.assertIn("等待同步", controller)
-        self.assertIn("一致", controller)
+        self.assertIn("僅本機（未入帳）", controller)
+        self.assertIn('smallPearlSync = "local_only"', bridge)
+        self.assertNotIn('smallPearlSync = "true"', bridge)
 
     def test_passive_timeline_hooks_the_real_model_send_and_receive_boundaries(self):
         text = BRIDGE.read_text(encoding="utf-8")

@@ -316,8 +316,8 @@ internal sealed class MainForm : Form
             rewardState.Text = $"伺服器龍珠結果：{rewardCount ?? "0"}　正式獎值 {RewardListNames(rewardTypes)}";
             pathResultState.Text = $"路徑結果：伺服器正式獎值 {RewardName(serverPathReward)}／客戶端演出路徑 {RewardName(visualPathReward)}";
             serverCodeState.Text = $"伺服器碼：{serverCode ?? "none"}　餘額差 {serverCodeAccountDelta ?? "?"}　回覆 {serverCodeRewardDelta ?? "?"}";
-            var smallPearlSyncText = smallPearlSync == "true" ? "一致" : smallPearlSync == "pending" ? "等待同步" : "未知";
-            smallPearlState.Text = $"真珠結算：本顆 +{smallPearlLastValue ?? "0"}／累計 +{smallPearlClientCredit ?? "0"}／帳戶 +{smallPearlAccountDelta ?? "?"}／{smallPearlSyncText}";
+            var smallPearlSyncText = smallPearlSync == "local_only" ? "僅本機（未入帳）" : "等待真珠";
+            smallPearlState.Text = $"真珠結算：本顆 +{smallPearlLastValue ?? "0"}／本機累計 +{smallPearlClientCredit ?? "0"}／本機帳戶 +{smallPearlAccountDelta ?? "?"}／{smallPearlSyncText}";
             dragonSyncState.Text = $"龍珠同步：{dragonSyncVerify ?? "none"}／序號 {dragonSyncIndex ?? "?"}／拒絕 {dragonSyncRejectCount ?? "0"}";
         }
         catch (Exception ex)
